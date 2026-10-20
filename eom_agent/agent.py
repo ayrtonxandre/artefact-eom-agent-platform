@@ -3,6 +3,8 @@ Multi-Agent definition for Artefact EOM (End-of-Mission) Pipeline using Google A
 """
 from google.adk.agents import Agent
 from .tools import (
+    fetch_ended_missions,
+    fetch_mission_financials,
     extract_folder_documents,
     generate_one_pager_slide,
     create_audit_sheet,
@@ -14,20 +16,21 @@ from .tools import (
 # ---------------------------------------------------------------------------
 EXECUTIVE_SYNTHESIZER_INSTRUCTIONS = """
 You are a Principal Consulting Partner at Artefact.
-Analyze the provided mission documentation and generate a structured C-level executive debrief divided into 4 specific cards.
+Analyze the provided mission documentation and financial KPIs (from BigQuery) to generate a structured C-level executive debrief divided into 4 specific cards.
 
 Return STRICTLY a valid JSON object matching this schema:
 {
   "context": "2-3 concise sentences on client background, initial problem, and mission objectives.",
-  "deliverables": "Bullet points summarizing the core technical solutions, models, architecture, and deliverables built.",
-  "businessImpact": "Quantifiable business impact, performance gains, ROI, efficiency improvements, or strategic value.",
-  "recommendations": "Critical takeaways, operational recommendations, and next steps for the client or team.",
-  "synthesis": "An integrated executive summary combining the above."
+  "deliverables": "Bullet points summarizing the core technical solutions, models, architecture, and deliverables built (3-4 bullets max).",
+  "businessImpact": "Quantifiable business impact, performance gains, ROI, efficiency improvements, or financial KPIs like budget, days delivered, or margin (3-4 bullets max).",
+  "recommendations": "Critical takeaways, operational recommendations, and next steps for the client or team (3-4 bullets max).",
+  "synthesis": "An integrated executive summary combining the above in 2-3 impactful sentences."
 }
 
 Style Guidelines:
 - Professional, analytical, authoritative consulting tone.
-- Highlighting quantifiable metrics where present (e.g. % accuracy, hours saved, cost reductions, revenue uplift).
+- Highlighting quantifiable metrics where present (e.g. % accuracy, hours saved, cost reductions, revenue uplift, sold vs delivered days).
+- Concise bullets (under 15 words per bullet) to ensure crisp layout in executive slide decks.
 - Emphasize Artefact's strategic delivery and technical excellence.
 """
 
@@ -35,7 +38,7 @@ executive_synthesizer = Agent(
     name="Executive_Synthesizer",
     model="gemini-2.5-flash",
     mode="single_turn",
-    description="Synthesizes mission documentation into Artefact C-level executive summary cards.",
+    description="Synthesizes mission documentation and BigQuery financial KPIs into Artefact C-level executive summary cards.",
     instruction=EXECUTIVE_SYNTHESIZER_INSTRUCTIONS,
 )
 
@@ -81,21 +84,29 @@ You are the Lead Project Operations Orchestrator at Artefact.
 Your mission is to autonomously manage the end-of-mission debriefing and knowledge curation pipeline.
 
 CRITICAL CONSTRAINTS:
-- Only use the tools provided in your toolset: `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`.
-- Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace tools directly.
+- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`.
+- Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace and data tools directly.
 
-CRITICAL EXECUTION ORDER:
-When provided with a Google Drive folder URL or ID and a Lead Email:
+CRITICAL EXECUTION FLOW:
 
+Scenario A: When asked to process missions for a specific date (or check ended missions today):
+1. Call `fetch_ended_missions(target_date)` to retrieve all missions ending on that date from BigQuery.
+2. For each mission returned:
+   - Extract the `drive_folder_url` (or ID) and `lead_email`.
+   - Process the mission using Steps 1 through 7 below.
+
+Scenario B: When provided with a Google Drive folder URL/ID or mission name directly:
 Step 1 [LOCAL ACTION - DO NOT DELEGATE]:
 Extract the folder ID from the provided URL/string and IMMEDIATELY call `extract_folder_documents` yourself.
 DO NOT call subagents before you have completed this step! You must have the extracted document texts in hand before contacting any subagent.
 
-Step 2:
-Infer the mission name from the folder metadata returned by `extract_folder_documents`. If the folder is empty or no files are returned, inform the user immediately.
+Step 2 [DISCOVER MISSION & FINANCIALS]:
+Infer the mission name from the folder metadata returned by `extract_folder_documents`.
+Optionally call `fetch_mission_financials(mission_name)` to retrieve official BigQuery KPIs (budget, days sold, delivered, margin) to enrich the synthesis.
+If the folder is empty or no files are returned, inform the user immediately.
 
 Step 3 [DELEGATE TO EXECUTIVE-SYNTHESIZER]:
-Call the subagent `Executive_Synthesizer`. Provide the extracted document contents and request the 4-card executive debrief JSON:
+Call the subagent `Executive_Synthesizer`. Provide both the extracted document contents and the BigQuery financial KPIs, and request the 4-card executive debrief JSON:
 - context
 - deliverables
 - businessImpact
@@ -118,6 +129,7 @@ Call `send_lead_notification` with the recipient email, mission name, slide URL,
 
 Step 8 [FINAL RESPONSE]:
 Present a clean markdown summary table to the user with direct links to:
+- Mission Name and Financial KPIs (Budget, Margin, Days)
 - Generated Google Slides One-Pager
 - Generated Google Sheets Knowledge Audit
 - Confirmation of email delivery to the Lead
@@ -126,10 +138,12 @@ Present a clean markdown summary table to the user with direct links to:
 root_agent = Agent(
     name="Artefact_EOM_Mission_Orchestrator",
     model="gemini-2.5-flash",
-    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Extracts project documentation from Google Drive, orchestrates executive synthesis into client-ready Google Slides, audits confidentiality risks in Google Sheets, and dispatches lead notifications.",
+    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Retrieves completed missions and financials from BigQuery, extracts project documentation from Google Drive, orchestrates executive synthesis into client-ready Google Slides, audits confidentiality risks in Google Sheets, and dispatches lead notifications.",
     instruction=ORCHESTRATOR_INSTRUCTIONS,
     sub_agents=[executive_synthesizer, security_auditor],
     tools=[
+        fetch_ended_missions,
+        fetch_mission_financials,
         extract_folder_documents,
         generate_one_pager_slide,
         create_audit_sheet,

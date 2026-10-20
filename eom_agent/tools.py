@@ -12,6 +12,35 @@ from .workspace_service import (
     handle_create_audit_sheet,
     handle_send_notification
 )
+from .bigquery_service import (
+    query_ended_missions,
+    query_mission_financials
+)
+
+def fetch_ended_missions(target_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Queries BigQuery in project global-finance-dashboard to retrieve all missions ending on target_date.
+    
+    Args:
+        target_date: Date string formatted as 'YYYY-MM-DD'. If omitted, defaults to today.
+        
+    Returns:
+        A list of mission records containing mission_id, mission_name, lead_email, drive_folder_url, and financials.
+    """
+    return query_ended_missions(target_date)
+
+
+def fetch_mission_financials(mission_name: str) -> Dict[str, Any]:
+    """
+    Queries BigQuery to fetch financial KPIs (budget sold, days delivered, margin) for a specific mission.
+    
+    Args:
+        mission_name: The name or ID of the mission.
+        
+    Returns:
+        A dictionary containing financial KPIs to enrich executive slides.
+    """
+    return query_mission_financials(mission_name) or {}
 
 def extract_folder_documents(folder_id: str) -> Dict[str, Any]:
     """

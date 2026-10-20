@@ -1,0 +1,123 @@
+{
+  "tools": [
+    {
+      "name": "extract_folder_documents",
+      "description": "Extracts document contents, file metadata, and mission context from a Google Drive mission folder.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folderId": {
+            "type": "string",
+            "description": "Google Drive folder URL or 33-character folder ID"
+          }
+        },
+        "required": [
+          "folderId"
+        ]
+      },
+      "annotations": {
+        "title": "Extract Folder Documents",
+        "readOnlyHint": true,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "generate_one_pager_slide",
+      "description": "Generates a Google Slides executive summary card using the Artefact EOM master template.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folderId": {
+            "type": "string",
+            "description": "Google Drive folder URL or ID to save the presentation in"
+          },
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission"
+          },
+          "cardData": {
+            "type": "object",
+            "description": "Dictionary of synthesized debrief fields: Context, Objectives, Deliverables, Team, Key Results, Learnings"
+          },
+          "templateId": {
+            "type": "string",
+            "description": "Template presentation ID to copy from"
+          }
+        },
+        "required": [
+          "folderId"
+        ]
+      },
+      "annotations": {
+        "title": "Generate One Pager Slide",
+        "destructiveHint": false,
+        "idempotentHint": false
+      }
+    },
+    {
+      "name": "create_audit_sheet",
+      "description": "Creates a Google Sheets audit checklist tracking confidentiality, risk level, and sanitization flags for mission deliverables.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folderId": {
+            "type": "string",
+            "description": "Google Drive folder URL or ID to save the audit sheet in"
+          },
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission"
+          },
+          "auditRecords": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "List of file audit records with classification, risk_level, and recommendations"
+          }
+        },
+        "required": [
+          "folderId"
+        ]
+      },
+      "annotations": {
+        "title": "Create Audit Sheet",
+        "destructiveHint": false,
+        "idempotentHint": false
+      }
+    },
+    {
+      "name": "send_lead_notification",
+      "description": "Sends an email notification via Gmail to the Mission Lead containing links to the generated Slide and Sheet.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recipientEmail": {
+            "type": "string",
+            "description": "Email address of the Mission Lead"
+          },
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission"
+          },
+          "slideUrl": {
+            "type": "string",
+            "description": "Link to the generated Google Slides deck"
+          },
+          "sheetUrl": {
+            "type": "string",
+            "description": "Link to the generated Google Sheets audit checklist"
+          }
+        },
+        "required": [
+          "recipientEmail"
+        ]
+      },
+      "annotations": {
+        "title": "Send Lead Notification",
+        "destructiveHint": false,
+        "idempotentHint": false
+      }
+    }
+  ]
+}

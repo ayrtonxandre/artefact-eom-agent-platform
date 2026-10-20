@@ -1,0 +1,7 @@
+google-cloud-aiplatform[adk,agent_engines]
+google-adk[a2a]==2.11.0
+google-genai>=1.66.0
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+pydantic>=2.0.0

@@ -303,10 +303,16 @@ def build_debrief_doc_html(
     lead_email: str,
     team_emails: List[str],
     deadline_str: str,
-    visuals_url: str
+    visuals_url: str,
+    industry: Optional[str] = None
 ) -> str:
     """Generates corporate Artefact debrief HTML template to be converted into a Google Doc."""
     team_display = ", ".join(team_emails) if team_emails else "Équipe Projet Artefact"
+    industry_row = f"""
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Secteur / Industrie</td>
+      <td>{industry}</td>
+    </tr>""" if industry else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -390,7 +396,7 @@ def build_debrief_doc_html(
     <tr>
       <td style="font-weight: bold; background-color: #f1f5f9;">Client</td>
       <td>{client}</td>
-    </tr>
+    </tr>{industry_row}
     <tr>
       <td style="font-weight: bold; background-color: #f1f5f9;">Manager de Mission</td>
       <td>{lead_email}</td>
@@ -482,16 +488,20 @@ def build_kickoff_email_html(
     doc_url: str,
     visuals_url: str,
     folder_url: str,
-    folder_name: str
+    folder_name: str,
+    industry: Optional[str] = None
 ) -> str:
     """Generates corporate Artefact launch / kickoff email in HTML format."""
     team_greeting = f"Bonjour l'équipe {mission_name}," if team_emails else "Bonjour,"
+    sub_info = f"Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong>"
+    if industry:
+        sub_info += f" | Secteur : <strong>{industry}</strong>"
     return f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; line-height: 1.6;">
       <div style="background-color: #0f172a; padding: 24px; border-radius: 8px 8px 0 0; text-align: left;">
         <span style="background-color: #1e293b; color: #38bdf8; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">Artefact EOM Pipeline</span>
         <h1 style="color: #ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Lancement du Débrief One-Pager de Fin de Mission</h1>
-        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong></p>
+        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">{sub_info}</p>
       </div>
       
       <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;">
@@ -552,6 +562,7 @@ def handle_launch_mission(
     parent_folder_id: Optional[str] = None,
     deadline_date: Optional[str] = None,
     notes: Optional[str] = None,
+    industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Step 2 in Target EOM Process: Initializes the mission workspace and dispatches kickoff email.
@@ -700,7 +711,8 @@ def handle_launch_mission(
                 lead_email=clean_lead,
                 team_emails=normalized_team_emails,
                 deadline_str=deadline_str,
-                visuals_url=visuals_folder_url
+                visuals_url=visuals_folder_url,
+                industry=industry
             )
             media = MediaInMemoryUpload(doc_html.encode("utf-8"), mimetype="text/html")
             new_doc = drive_svc.files().create(
@@ -730,7 +742,8 @@ def handle_launch_mission(
             doc_url=doc_url,
             visuals_url=visuals_folder_url,
             folder_url=mission_folder_url,
-            folder_name=mission_folder_name or clean_mission
+            folder_name=mission_folder_name or clean_mission,
+            industry=industry
         )
         msg = MIMEText(email_html, "html")
         msg["to"] = clean_lead

@@ -3,6 +3,8 @@ Multi-Agent definition for Artefact EOM (End-of-Mission) Pipeline using Google A
 """
 from google.adk.agents import Agent
 from .tools import (
+    detect_upcoming_missions,
+    orchestrate_eom_detection_and_launch,
     fetch_ended_missions,
     fetch_mission_financials,
     launch_mission_kickoff,
@@ -86,13 +88,19 @@ You are the Lead Project Operations Orchestrator at Artefact.
 Your mission is to autonomously manage the end-of-mission debriefing and knowledge curation pipeline.
 
 CRITICAL CONSTRAINTS:
-- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `launch_mission_kickoff`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
+- Only use the tools provided in your toolset: `detect_upcoming_missions`, `orchestrate_eom_detection_and_launch`, `fetch_ended_missions`, `fetch_mission_financials`, `launch_mission_kickoff`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
 - Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace and data tools directly.
 
 CRITICAL EXECUTION FLOW:
 
+Scenario A0 [STEP 1 - BIGQUERY DETECTION & PIPELINE TRIGGER]:
+When asked to scan for ending missions, detect missions at J-7, or run the daily autonomous pipeline:
+1. Call `detect_upcoming_missions(days_ahead=7)` to inspect client missions ending in 7 days from BigQuery (`global-finance-dashboard.marts_ext_eom_chat.mart_ext_eom_chat_missions`).
+2. Or call `orchestrate_eom_detection_and_launch(days_ahead=7, auto_launch=True)` to automatically detect upcoming missions, check the Central Status Tracker for existing entries, and trigger Step 2 (Kickoff Launch: Drive folder, debrief doc, kickoff email, tracker update) for any new missions.
+3. Present the list of detected missions with status, lead emails, and direct links to workspaces.
+
 Scenario A [STEP 2 - MISSION KICKOFF & LAUNCH]:
-When asked to launch or initialize a mission at J-7 (or start the EOM process for a new mission):
+When asked to launch or initialize a mission at J-7 (or start the EOM process for a specific mission):
 1. Call `launch_mission_kickoff` with:
    - `mission_name`
    - `lead_email`
@@ -100,6 +108,7 @@ When asked to launch or initialize a mission at J-7 (or start the EOM process fo
    - `team_emails` (optional list of collaborators to CC)
    - `folder_id` or `parent_folder_id` (optional)
    - `deadline_date` (optional, defaults to J-7)
+   - `industry` (optional)
 2. This creates the Drive mission workspace, the `01_Visuals & Diagrams` subfolder, the structured 3-section Debrief Google Doc (Challenge, Solution, Results), sends the kickoff email to the lead and team, and registers status `LAUNCHED` in the Central Status Tracker.
 3. Present the confirmation table with direct links to the Google Doc, Visuals folder, and Drive workspace.
 
@@ -160,6 +169,8 @@ root_agent = Agent(
     instruction=ORCHESTRATOR_INSTRUCTIONS,
     sub_agents=[executive_synthesizer, security_auditor],
     tools=[
+        detect_upcoming_missions,
+        orchestrate_eom_detection_and_launch,
         fetch_ended_missions,
         fetch_mission_financials,
         launch_mission_kickoff,

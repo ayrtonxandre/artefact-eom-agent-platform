@@ -16,8 +16,77 @@ from .workspace_service import (
 )
 from .bigquery_service import (
     query_ended_missions,
-    query_mission_financials
+    query_mission_financials,
+    query_upcoming_missions,
+    detect_and_launch_upcoming_missions
 )
+
+def detect_upcoming_missions(
+    days_ahead: Optional[int] = 7,
+    target_date: Optional[str] = None,
+    client_name: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """
+    Step 1 in Artefact Target EOM Process: Queries BigQuery (mart_ext_eom_chat_missions)
+    to detect active client missions ending at J-7 (or on a target_date).
+    
+    Args:
+        days_ahead: Number of days ahead to scan (default 7 for J-7 kickoff).
+        target_date: Optional specific end date formatted as 'YYYY-MM-DD'.
+        client_name: Optional substring filter for client name (e.g. 'Crédit Agricole', 'Clariane').
+        lead_email: Optional filter for a specific mission lead email.
+        limit: Max number of records to retrieve (default 50).
+        
+    Returns:
+        A list of mission records containing mission_id, mission_name, client_name, industry, lead_email, and end_date.
+    """
+    return query_upcoming_missions(
+        days_ahead=days_ahead if not target_date else None,
+        target_date=target_date,
+        client_name=client_name,
+        lead_email=lead_email,
+        limit=limit
+    )
+
+
+def orchestrate_eom_detection_and_launch(
+    days_ahead: int = 7,
+    target_date: Optional[str] = None,
+    client_name: Optional[str] = None,
+    auto_launch: bool = True,
+    dry_run: bool = False,
+    override_lead_email: Optional[str] = None,
+    limit: int = 10
+) -> Dict[str, Any]:
+    """
+    Autonomous Pipeline Orchestrator: Chains Step 1 (BigQuery Detection) into Step 2 (Kickoff Launch).
+    Scans BigQuery for missions ending at J-7, checks the Central Status Tracker for existing entries,
+    and automatically launches new missions (creating Drive folders, debrief doc, sending kickoff email, and logging status).
+    
+    Args:
+        days_ahead: Days horizon for detection (default 7).
+        target_date: Optional exact date 'YYYY-MM-DD'.
+        client_name: Optional client filter.
+        auto_launch: If True, launches detected missions; if False, returns preview candidates.
+        dry_run: If True, simulates launch without creating Google Drive files or sending emails.
+        override_lead_email: Optional email to redirect kickoff notifications during testing (e.g. user email).
+        limit: Max number of missions to process in one execution run.
+        
+    Returns:
+        Summary dict containing detection criteria, total detected, launched count, skipped count, and mission details.
+    """
+    return detect_and_launch_upcoming_missions(
+        days_ahead=days_ahead,
+        target_date=target_date,
+        client_name=client_name,
+        auto_launch=auto_launch,
+        dry_run=dry_run,
+        override_lead_email=override_lead_email,
+        limit=limit
+    )
+
 
 def fetch_ended_missions(target_date: Optional[str] = None) -> List[Dict[str, Any]]:
     """
@@ -52,6 +121,7 @@ def launch_mission_kickoff(
     folder_id: Optional[str] = None,
     parent_folder_id: Optional[str] = None,
     deadline_date: Optional[str] = None,
+    industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Step 2 in Artefact Target EOM Process: Initializes mission workspace and dispatches kickoff email.
@@ -67,6 +137,7 @@ def launch_mission_kickoff(
         folder_id: Optional existing Google Drive mission folder ID.
         parent_folder_id: Optional parent container ID in which to create the mission workspace folder.
         deadline_date: Optional target completion date string (e.g. '28/10/2026'). Defaults to J-7.
+        industry: Optional client industry sector (e.g. 'Bank', 'Pharma', 'Luxury & Beauty').
         
     Returns:
         A dictionary with status, folderId, folderUrl, docId, docUrl, visualsFolderUrl, and emailStatus.
@@ -79,6 +150,7 @@ def launch_mission_kickoff(
         folder_id=folder_id,
         parent_folder_id=parent_folder_id,
         deadline_date=deadline_date,
+        industry=industry,
     )
 
 

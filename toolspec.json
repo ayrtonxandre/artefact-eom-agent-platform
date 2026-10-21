@@ -1,6 +1,81 @@
 {
   "tools": [
     {
+      "name": "detect_upcoming_missions",
+      "description": "Step 1 in Artefact Target EOM Process: Queries BigQuery (mart_ext_eom_chat_missions) to detect active client missions ending at J-7 or target date.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "daysAhead": {
+            "type": "integer",
+            "description": "Number of days ahead to scan (default 7 for J-7 kickoff)"
+          },
+          "targetDate": {
+            "type": "string",
+            "description": "Optional specific end date formatted as 'YYYY-MM-DD'"
+          },
+          "clientName": {
+            "type": "string",
+            "description": "Optional substring filter for client name (e.g. Crédit Agricole, Clariane)"
+          },
+          "leadEmail": {
+            "type": "string",
+            "description": "Optional filter for a specific mission lead email"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max number of records to retrieve (default 50)"
+          }
+        }
+      },
+      "annotations": {
+        "title": "Detect Upcoming Missions",
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "detect_and_launch_missions",
+      "description": "Autonomous Pipeline Orchestrator: Chains Step 1 (BigQuery Detection) into Step 2 (Kickoff Launch). Scans BigQuery for missions ending at J-7, checks Central Status Tracker for existing entries, and automatically launches new missions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "daysAhead": {
+            "type": "integer",
+            "description": "Days horizon for detection (default 7)"
+          },
+          "targetDate": {
+            "type": "string",
+            "description": "Optional exact date 'YYYY-MM-DD'"
+          },
+          "clientName": {
+            "type": "string",
+            "description": "Optional client filter"
+          },
+          "autoLaunch": {
+            "type": "boolean",
+            "description": "If True, launches detected missions; if False, returns preview candidates"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "If True, simulates launch without creating Google Drive files or sending emails"
+          },
+          "overrideLeadEmail": {
+            "type": "string",
+            "description": "Optional email to redirect kickoff notifications during testing"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max number of missions to process"
+          }
+        }
+      },
+      "annotations": {
+        "title": "Detect and Launch Missions Orchestrator",
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
       "name": "launch_mission_kickoff",
       "description": "Initializes mission workspace folder, 3-section Debrief Google Doc (Challenge, Solution, Results), Visuals subfolder, dispatches kickoff email to lead and team, and registers status LAUNCHED in tracker.",
       "inputSchema": {

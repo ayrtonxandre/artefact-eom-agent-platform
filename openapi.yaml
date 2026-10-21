@@ -7,6 +7,111 @@ servers:
   - url: https://eom-workspace-service-6vcfc2gc7q-ew.a.run.app
     description: Cloud Run Production Service
 paths:
+  /missions/detect:
+    post:
+      operationId: detect_upcoming_missions
+      summary: Step 1 - Queries BigQuery for client missions ending at J-7 or custom date
+      description: Queries global-finance-dashboard.marts_ext_eom_chat.mart_ext_eom_chat_missions to detect ending missions.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                daysAhead:
+                  type: integer
+                  default: 7
+                  description: Number of days ahead to scan (default 7 for J-7 kickoff)
+                targetDate:
+                  type: string
+                  description: Specific target date YYYY-MM-DD
+                clientName:
+                  type: string
+                  description: Optional filter by client name
+                leadEmail:
+                  type: string
+                  description: Optional filter by lead email
+                limit:
+                  type: integer
+                  default: 50
+      responses:
+        '200':
+          description: List of detected missions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    mission_id:
+                      type: string
+                    mission_name:
+                      type: string
+                    client_name:
+                      type: string
+                    industry:
+                      type: string
+                    lead_email:
+                      type: string
+                    end_date:
+                      type: string
+                    days_until_end:
+                      type: integer
+
+  /missions/detect-and-launch:
+    post:
+      operationId: detect_and_launch_missions
+      summary: Step 1 to Step 2 Orchestrator - Detects upcoming missions and launches Step 2 for new ones
+      description: Autonomous pipeline trigger that detects J-7 missions from BigQuery, verifies against Central Tracker, and launches uninitialized missions.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                daysAhead:
+                  type: integer
+                  default: 7
+                targetDate:
+                  type: string
+                clientName:
+                  type: string
+                autoLaunch:
+                  type: boolean
+                  default: true
+                dryRun:
+                  type: boolean
+                  default: false
+                overrideLeadEmail:
+                  type: string
+                  description: Optional lead email redirect for staging/testing
+                limit:
+                  type: integer
+                  default: 10
+      responses:
+        '200':
+          description: Execution summary of detected and launched missions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  total_detected:
+                    type: integer
+                  launched_count:
+                    type: integer
+                  skipped_count:
+                    type: integer
+                  missions:
+                    type: array
+                    items:
+                      type: object
+
   /launch-mission:
     post:
       operationId: launch_mission_kickoff

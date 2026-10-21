@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import base64
@@ -6,9 +7,17 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Add workspace root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from eom_agent.bigquery_service import (
+    query_upcoming_missions,
+    detect_and_launch_upcoming_missions
+)
 
 import google.auth
 from google.oauth2.credentials import Credentials
@@ -307,10 +316,16 @@ def build_debrief_doc_html(
     lead_email: str,
     team_emails: List[str],
     deadline_str: str,
-    visuals_url: str
+    visuals_url: str,
+    industry: Optional[str] = None
 ) -> str:
     """Generates corporate Artefact debrief HTML template to be converted into a Google Doc."""
     team_display = ", ".join(team_emails) if team_emails else "Équipe Projet Artefact"
+    industry_row = f"""
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Secteur / Industrie</td>
+      <td>{industry}</td>
+    </tr>""" if industry else ""
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -394,7 +409,7 @@ def build_debrief_doc_html(
     <tr>
       <td style="font-weight: bold; background-color: #f1f5f9;">Client</td>
       <td>{client}</td>
-    </tr>
+    </tr>{industry_row}
     <tr>
       <td style="font-weight: bold; background-color: #f1f5f9;">Manager de Mission</td>
       <td>{lead_email}</td>
@@ -486,16 +501,20 @@ def build_kickoff_email_html(
     doc_url: str,
     visuals_url: str,
     folder_url: str,
-    folder_name: str
+    folder_name: str,
+    industry: Optional[str] = None
 ) -> str:
     """Generates corporate Artefact launch / kickoff email in HTML format."""
     team_greeting = f"Bonjour l'équipe {mission_name}," if team_emails else "Bonjour,"
+    sub_info = f"Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong>"
+    if industry:
+        sub_info += f" | Secteur : <strong>{industry}</strong>"
     return f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; line-height: 1.6;">
       <div style="background-color: #0f172a; padding: 24px; border-radius: 8px 8px 0 0; text-align: left;">
         <span style="background-color: #1e293b; color: #38bdf8; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">Artefact EOM Pipeline</span>
         <h1 style="color: #ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Lancement du Débrief One-Pager de Fin de Mission</h1>
-        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong></p>
+        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">{sub_info}</p>
       </div>
       
       <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;">
@@ -556,6 +575,7 @@ def handle_launch_mission(
     parent_folder_id: Optional[str] = None,
     deadline_date: Optional[str] = None,
     notes: Optional[str] = None,
+    industry: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Step 2 in Target EOM Process: Initializes the mission workspace and dispatches kickoff email.
@@ -704,7 +724,8 @@ def handle_launch_mission(
                 lead_email=clean_lead,
                 team_emails=normalized_team_emails,
                 deadline_str=deadline_str,
-                visuals_url=visuals_folder_url
+                visuals_url=visuals_folder_url,
+                industry=industry
             )
             media = MediaInMemoryUpload(doc_html.encode("utf-8"), mimetype="text/html")
             new_doc = drive_svc.files().create(
@@ -734,7 +755,8 @@ def handle_launch_mission(
             doc_url=doc_url,
             visuals_url=visuals_folder_url,
             folder_url=mission_folder_url,
-            folder_name=mission_folder_name or clean_mission
+            folder_name=mission_folder_name or clean_mission,
+            industry=industry
         )
         msg = MIMEText(email_html, "html")
         msg["to"] = clean_lead
@@ -1273,6 +1295,7 @@ class LaunchMissionRequest(BaseModel):
     leadEmail: Optional[str] = None
     lead_email: Optional[str] = None
     client: Optional[str] = None
+    industry: Optional[str] = None
     teamEmails: Optional[Any] = None
     team_emails: Optional[Any] = None
     folderId: Optional[str] = None
@@ -1306,6 +1329,100 @@ class LaunchMissionRequest(BaseModel):
 
     def get_deadline_date(self) -> Optional[str]:
         return self.deadlineDate or self.deadline_date
+
+class DetectMissionsRequest(BaseModel):
+    daysAhead: Optional[int] = 7
+    days_ahead: Optional[int] = None
+    targetDate: Optional[str] = None
+    target_date: Optional[str] = None
+    dateStart: Optional[str] = None
+    date_start: Optional[str] = None
+    dateEnd: Optional[str] = None
+    date_end: Optional[str] = None
+    clientName: Optional[str] = None
+    client_name: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    limit: Optional[int] = 50
+
+    def get_days_ahead(self) -> Optional[int]:
+        if self.targetDate or self.target_date or (self.dateStart and self.dateEnd):
+            return None
+        return self.days_ahead if self.days_ahead is not None else self.daysAhead
+
+    def get_target_date(self) -> Optional[str]:
+        return self.targetDate or self.target_date
+
+    def get_date_start(self) -> Optional[str]:
+        return self.dateStart or self.date_start
+
+    def get_date_end(self) -> Optional[str]:
+        return self.dateEnd or self.date_end
+
+    def get_client_name(self) -> Optional[str]:
+        return self.clientName or self.client_name
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+class DetectAndLaunchRequest(BaseModel):
+    daysAhead: Optional[int] = 7
+    days_ahead: Optional[int] = None
+    targetDate: Optional[str] = None
+    target_date: Optional[str] = None
+    dateStart: Optional[str] = None
+    date_start: Optional[str] = None
+    dateEnd: Optional[str] = None
+    date_end: Optional[str] = None
+    clientName: Optional[str] = None
+    client_name: Optional[str] = None
+    autoLaunch: Optional[bool] = True
+    auto_launch: Optional[bool] = None
+    dryRun: Optional[bool] = False
+    dry_run: Optional[bool] = None
+    overrideLeadEmail: Optional[str] = None
+    override_lead_email: Optional[str] = None
+    parentFolderId: Optional[str] = None
+    parent_folder_id: Optional[str] = None
+    trackerId: Optional[str] = None
+    tracker_id: Optional[str] = None
+    limit: Optional[int] = 10
+
+    def get_days_ahead(self) -> Optional[int]:
+        if self.targetDate or self.target_date or (self.dateStart and self.dateEnd):
+            return None
+        return self.days_ahead if self.days_ahead is not None else self.daysAhead
+
+    def get_target_date(self) -> Optional[str]:
+        return self.targetDate or self.target_date
+
+    def get_date_start(self) -> Optional[str]:
+        return self.dateStart or self.date_start
+
+    def get_date_end(self) -> Optional[str]:
+        return self.dateEnd or self.date_end
+
+    def get_client_name(self) -> Optional[str]:
+        return self.clientName or self.client_name
+
+    def get_auto_launch(self) -> bool:
+        if self.auto_launch is not None:
+            return self.auto_launch
+        return self.autoLaunch if self.autoLaunch is not None else True
+
+    def get_dry_run(self) -> bool:
+        if self.dry_run is not None:
+            return self.dry_run
+        return self.dryRun if self.dryRun is not None else False
+
+    def get_override_lead_email(self) -> Optional[str]:
+        return self.overrideLeadEmail or self.override_lead_email
+
+    def get_parent_folder_id(self) -> Optional[str]:
+        return self.parentFolderId or self.parent_folder_id
+
+    def get_tracker_id(self) -> Optional[str]:
+        return self.trackerId or self.tracker_id
 
 class ExtractDocumentsRequest(BaseModel):
     folderId: Optional[str] = None
@@ -1425,6 +1542,57 @@ class LogPipelineStatusRequest(BaseModel):
 def health_check():
     return {"status": "ok", "service": "Artefact EOM Workspace Tool Service"}
 
+@app.post("/missions/detect", operation_id="detect_upcoming_missions")
+def api_detect_missions(req: DetectMissionsRequest):
+    try:
+        return query_upcoming_missions(
+            days_ahead=req.get_days_ahead(),
+            target_date=req.get_target_date(),
+            date_start=req.get_date_start(),
+            date_end=req.get_date_end(),
+            client_name=req.get_client_name(),
+            lead_email=req.get_lead_email(),
+            limit=req.limit or 50
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/missions/upcoming")
+def api_get_upcoming_missions(
+    days_ahead: Optional[int] = 7,
+    target_date: Optional[str] = None,
+    client: Optional[str] = None,
+    limit: Optional[int] = 50
+):
+    try:
+        return query_upcoming_missions(
+            days_ahead=days_ahead if not target_date else None,
+            target_date=target_date,
+            client_name=client,
+            limit=limit or 50
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/missions/detect-and-launch", operation_id="detect_and_launch_missions")
+def api_detect_and_launch(req: DetectAndLaunchRequest):
+    try:
+        return detect_and_launch_upcoming_missions(
+            days_ahead=req.get_days_ahead() or 7,
+            target_date=req.get_target_date(),
+            date_start=req.get_date_start(),
+            date_end=req.get_date_end(),
+            client_name=req.get_client_name(),
+            auto_launch=req.get_auto_launch(),
+            dry_run=req.get_dry_run(),
+            override_lead_email=req.get_override_lead_email(),
+            parent_folder_id=req.get_parent_folder_id(),
+            tracker_id=req.get_tracker_id(),
+            limit=req.limit or 10
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/launch-mission", operation_id="launch_mission_kickoff")
 def api_launch_mission(req: LaunchMissionRequest):
     try:
@@ -1436,7 +1604,8 @@ def api_launch_mission(req: LaunchMissionRequest):
             folder_id=req.get_folder_id(),
             parent_folder_id=req.get_parent_folder_id(),
             deadline_date=req.get_deadline_date(),
-            notes=req.notes
+            notes=req.notes,
+            industry=req.industry
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -9,6 +9,7 @@ from .tools import (
     generate_one_pager_slide,
     create_audit_sheet,
     send_lead_notification,
+    log_pipeline_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ You are the Lead Project Operations Orchestrator at Artefact.
 Your mission is to autonomously manage the end-of-mission debriefing and knowledge curation pipeline.
 
 CRITICAL CONSTRAINTS:
-- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`.
+- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
 - Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace and data tools directly.
 
 CRITICAL EXECUTION FLOW:
@@ -124,8 +125,9 @@ Call `generate_one_pager_slide` passing the folder ID, mission name, and the 4-c
 Step 6 [CREATE AUDIT SHEET]:
 Immediately call `create_audit_sheet` passing the folder ID, mission name, and the audit records array directly from Security_Auditor. Do not write or execute code.
 
-Step 7 [SEND NOTIFICATION]:
+Step 7 [CENTRAL LOGGING & NOTIFICATION - Target Process Step 7]:
 Call `send_lead_notification` with the recipient email, mission name, slide URL, and sheet URL.
+The workspace operations automatically deduplicate existing files and maintain the Central Pipeline Status Tracker log. If needed, you can also call `log_pipeline_status` directly.
 
 Step 8 [FINAL RESPONSE]:
 Present a clean markdown summary table to the user with direct links to:
@@ -133,12 +135,13 @@ Present a clean markdown summary table to the user with direct links to:
 - Generated Google Slides One-Pager
 - Generated Google Sheets Knowledge Audit
 - Confirmation of email delivery to the Lead
+- Central Pipeline Status Tracker (https://docs.google.com/spreadsheets/d/1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s/edit)
 """
 
 root_agent = Agent(
     name="Artefact_EOM_Mission_Orchestrator",
     model="gemini-2.5-flash",
-    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Retrieves completed missions and financials from BigQuery, extracts project documentation from Google Drive, orchestrates executive synthesis into client-ready Google Slides, audits confidentiality risks in Google Sheets, and dispatches lead notifications.",
+    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Retrieves completed missions and financials from BigQuery, extracts project documentation from Google Drive, orchestrates executive synthesis into client-ready Google Slides, audits confidentiality risks in Google Sheets, maintains central pipeline status log, and dispatches lead notifications.",
     instruction=ORCHESTRATOR_INSTRUCTIONS,
     sub_agents=[executive_synthesizer, security_auditor],
     tools=[
@@ -148,5 +151,6 @@ root_agent = Agent(
         generate_one_pager_slide,
         create_audit_sheet,
         send_lead_notification,
+        log_pipeline_status,
     ],
 )

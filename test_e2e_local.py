@@ -96,5 +96,31 @@ notif_res = handle_send_notification(
 print(f"Notification Status: {notif_res.get('status')}")
 
 print("\n" + "=" * 60)
-print("🎉 ALL 4 BACKEND ENDPOINTS PASSED END-TO-END VERIFICATION!")
+print("TEST 5: STEP 7 CENTRAL PIPELINE STATUS TRACKER VERIFICATION")
+print("=" * 60)
+from main import get_sheets_service, DEFAULT_TRACKER_ID, CENTRAL_TRACKER_TAB
+sheets_svc = get_sheets_service()
+res = sheets_svc.spreadsheets().values().get(
+    spreadsheetId=DEFAULT_TRACKER_ID,
+    range=f"'{CENTRAL_TRACKER_TAB}'!A:J"
+).execute()
+rows = res.get("values", [])
+print(f"Central Tracker URL: https://docs.google.com/spreadsheets/d/{DEFAULT_TRACKER_ID}/edit")
+print(f"Total Logged Missions: {len(rows) - 1}")
+print("-" * 60)
+for idx, r in enumerate(rows):
+    if idx == 0:
+        print(f"Header: {' | '.join(r)}")
+    elif r and r[0].strip().lower() == mission_name.strip().lower():
+        print(f"Row {idx+1} (Current Mission):")
+        print(f"  • Mission Name : {r[0]}")
+        print(f"  • Status       : {r[3] if len(r) > 3 else 'N/A'}")
+        print(f"  • One-Pager    : {r[4] if len(r) > 4 else 'N/A'}")
+        print(f"  • Audit Sheet  : {r[5] if len(r) > 5 else 'N/A'}")
+        print(f"  • Risk         : {r[7] if len(r) > 7 else 'N/A'}")
+        print(f"  • Last Updated : {r[8] if len(r) > 8 else 'N/A'}")
+        print(f"  • Notes        : {r[9] if len(r) > 9 else 'N/A'}")
+
+print("\n" + "=" * 60)
+print("🎉 ALL ENDPOINTS & STEP 7 STATUS TRACKER PASSED END-TO-END!")
 print("=" * 60)

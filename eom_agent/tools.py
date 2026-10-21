@@ -10,7 +10,8 @@ from .workspace_service import (
     handle_extract_documents,
     handle_generate_slide,
     handle_create_audit_sheet,
-    handle_send_notification
+    handle_send_notification,
+    handle_log_pipeline_status
 )
 from .bigquery_service import (
     query_ended_missions,
@@ -127,4 +128,45 @@ def send_lead_notification(
         mission_name=mission_name,
         slide_url=slide_url,
         sheet_url=sheet_url
+    )
+
+
+def log_pipeline_status(
+    mission_name: str,
+    status: str,
+    client: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    deck_url: Optional[str] = None,
+    audit_url: Optional[str] = None,
+    folder_url: Optional[str] = None,
+    risk: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Step 7 in Target Process: Records or updates the project lifecycle status in the Central Pipeline Status Tracker spreadsheet.
+    
+    Args:
+        mission_name: Name of the mission (e.g., Clariane, TotalEnergies).
+        status: Milestone status (e.g. DOCS_EXTRACTED, DECK_GENERATED, AUDIT_READY, NOTIFIED_LEAD, PUBLISHED).
+        client: Client company name.
+        lead_email: Email address of the mission delivery lead.
+        deck_url: Web URL to the generated Google Slides deck.
+        audit_url: Web URL to the generated Google Sheets audit checklist.
+        folder_url: Web URL to the Google Drive folder.
+        risk: Highest detected confidentiality risk (LOW, MEDIUM, HIGH, CRITICAL).
+        notes: Execution log notes or details.
+        
+    Returns:
+        A dictionary with status, action, missionName, pipelineStatus, and trackerId.
+    """
+    return handle_log_pipeline_status(
+        mission_name=mission_name,
+        status=status,
+        client=client,
+        lead_email=lead_email,
+        deck_url=deck_url,
+        audit_url=audit_url,
+        folder_url=folder_url,
+        risk=risk,
+        notes=notes,
     )

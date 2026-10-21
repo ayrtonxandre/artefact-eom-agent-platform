@@ -12,8 +12,24 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # =============================================================================
-# AUTHENTICATION HELPER
+# AUTHENTICATION HELPER & CONSTANTS
 # =============================================================================
+
+CENTRAL_TRACKER_NAME = "[Artefact EOM] Central Pipeline Status Tracker"
+CENTRAL_TRACKER_TAB = "Pipeline Status Log"
+DEFAULT_TRACKER_ID = "1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s"
+TRACKER_HEADERS = [
+    "Mission Name",
+    "Client",
+    "Lead Email",
+    "Status",
+    "One-Pager Deck",
+    "Audit Sheet",
+    "Drive Folder",
+    "Confidentiality Risk",
+    "Last Updated",
+    "Notes"
+]
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -91,6 +107,190 @@ def format_card_text(val: Any) -> str:
         return "\n".join([f"• {k}: {v}" for k, v in val.items()])
     return str(val).strip()
 
+def get_or_create_central_tracker_sheet(creds=None) -> str:
+    """
+    Returns the spreadsheet ID of the Central Pipeline Status Tracker.
+    If the spreadsheet does not exist yet, creates and formats it automatically.
+    """
+    env_id = os.environ.get("CENTRAL_TRACKER_ID")
+    if env_id:
+        return env_id
+    if DEFAULT_TRACKER_ID:
+        return DEFAULT_TRACKER_ID
+
+    drive_svc = get_drive_service(creds)
+    sheets_svc = get_sheets_service(creds)
+
+    res = drive_svc.files().list(
+        q=f"name = '{CENTRAL_TRACKER_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        fields="files(id, name)"
+    ).execute()
+    files = res.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    # Create new central tracker spreadsheet
+    ss_body = {
+        "properties": {"title": CENTRAL_TRACKER_NAME},
+        "sheets": [{
+            "properties": {
+                "sheetId": 0,
+                "title": CENTRAL_TRACKER_TAB,
+                "gridProperties": {"frozenRowCount": 1}
+            }
+        }]
+    }
+    ss = sheets_svc.spreadsheets().create(body=ss_body, fields="spreadsheetId").execute()
+    new_id = ss["spreadsheetId"]
+
+    # Write Header row
+    sheets_svc.spreadsheets().values().update(
+        spreadsheetId=new_id,
+        range=f"'{CENTRAL_TRACKER_TAB}'!A1:J1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [TRACKER_HEADERS]}
+    ).execute()
+
+    # Apply corporate formatting (Artefact Dark Navy #0F172A)
+    format_reqs = [
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": 0,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": len(TRACKER_HEADERS)
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": {"red": 0.06, "green": 0.09, "blue": 0.16},
+                        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "fontSize": 10}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"
+            }
+        },
+        {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": 0,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0,
+                    "endIndex": len(TRACKER_HEADERS)
+                }
+            }
+        }
+    ]
+    sheets_svc.spreadsheets().batchUpdate(
+        spreadsheetId=new_id,
+        body={"requests": format_reqs}
+    ).execute()
+
+    return new_id
+
+
+def handle_log_pipeline_status(
+    mission_name: str,
+    status: str,
+    client: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    deck_url: Optional[str] = None,
+    audit_url: Optional[str] = None,
+    folder_url: Optional[str] = None,
+    risk: Optional[str] = None,
+    notes: Optional[str] = None,
+    tracker_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Step 7 in Artefact Target EOM Process: Maintains the central status log.
+    Upserts the pipeline milestone into the Central Pipeline Status Tracker spreadsheet.
+    Prevents duplicate rows by updating existing mission entries in place.
+    """
+    creds = get_credentials()
+    sheets_svc = get_sheets_service(creds)
+    target_tracker_id = tracker_id or get_or_create_central_tracker_sheet(creds)
+    tab_name = CENTRAL_TRACKER_TAB
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # Read existing rows
+    try:
+        res = sheets_svc.spreadsheets().values().get(
+            spreadsheetId=target_tracker_id,
+            range=f"'{tab_name}'!A:J"
+        ).execute()
+        rows = res.get("values", [])
+    except Exception as e:
+        print(f"[Tracker] Error reading tracker spreadsheet {target_tracker_id}: {e}")
+        rows = []
+
+    target_row_idx = None
+    existing_row = []
+    clean_mission = mission_name.strip().lower()
+
+    for idx, r in enumerate(rows):
+        if r and r[0].strip().lower() == clean_mission:
+            target_row_idx = idx + 1  # 1-indexed for Sheets API
+            existing_row = r
+            break
+
+    def get_existing(col_idx: int) -> str:
+        if existing_row and len(existing_row) > col_idx:
+            return existing_row[col_idx]
+        return ""
+
+    # Merge updated fields with existing fields (preserves non-empty data across stages)
+    row_values = [
+        mission_name,
+        client or get_existing(1),
+        lead_email or get_existing(2),
+        status or get_existing(3),
+        deck_url or get_existing(4),
+        audit_url or get_existing(5),
+        folder_url or get_existing(6),
+        risk or get_existing(7),
+        now_str,
+        notes if notes is not None else get_existing(9)
+    ]
+
+    try:
+        if target_row_idx:
+            sheets_svc.spreadsheets().values().update(
+                spreadsheetId=target_tracker_id,
+                range=f"'{tab_name}'!A{target_row_idx}:J{target_row_idx}",
+                valueInputOption="USER_ENTERED",
+                body={"values": [row_values]}
+            ).execute()
+            action = f"UPDATED row {target_row_idx}"
+        else:
+            sheets_svc.spreadsheets().values().append(
+                spreadsheetId=target_tracker_id,
+                range=f"'{tab_name}'!A:J",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row_values]}
+            ).execute()
+            action = "APPENDED new row"
+
+        return {
+            "status": "SUCCESS",
+            "action": action,
+            "missionName": mission_name,
+            "pipelineStatus": status,
+            "trackerId": target_tracker_id,
+            "updatedAt": now_str
+        }
+    except Exception as e:
+        print(f"[Tracker] Failed to update central status tracker: {e}")
+        return {
+            "status": "FAILED",
+            "error": str(e),
+            "missionName": mission_name,
+            "pipelineStatus": status
+        }
+
 # =============================================================================
 # CORE BUSINESS LOGIC HANDLERS
 # =============================================================================
@@ -157,6 +357,19 @@ def handle_extract_documents(folder_raw: str) -> Dict[str, Any]:
         [f"--- FILE: {item['name']} ---\n{item['content']}" for item in extracted_files]
     )
 
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+
+    # Step 7: Record milestone into Central Status Tracker
+    try:
+        handle_log_pipeline_status(
+            mission_name=mission_name,
+            status="DOCS_EXTRACTED",
+            folder_url=folder_url,
+            notes=f"Extracted {len(extracted_files)} files from Drive folder"
+        )
+    except Exception as e:
+        print(f"[Tracker] Step 7 auto-log warning in extract_documents: {e}")
+
     return {
         "folderId": folder_id,
         "missionName": mission_name,
@@ -186,6 +399,30 @@ def handle_generate_slide(folder_raw: str, mission_name: str, card: Any, templat
 
     template_id = template_id or "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
     new_title = f"[One-Pager] {mission_name}"
+
+    # Deduplication: clean up any existing duplicate presentations in target mission folder
+    try:
+        dup_query = f"'{folder_id}' in parents and name = '{new_title}' and mimeType = 'application/vnd.google-apps.presentation' and trashed = false"
+        dup_res = drive_svc.files().list(
+            q=dup_query,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            fields="files(id, name)"
+        ).execute()
+        for existing in dup_res.get("files", []):
+            try:
+                drive_svc.files().delete(fileId=existing["id"], supportsAllDrives=True).execute()
+            except Exception:
+                try:
+                    drive_svc.files().update(
+                        fileId=existing["id"],
+                        body={"name": f"[Archive - {datetime.now().strftime('%Y%m%d_%H%M')}] {new_title}"},
+                        supportsAllDrives=True
+                    ).execute()
+                except Exception:
+                    pass
+    except Exception as dup_err:
+        print(f"[Slide Deduplication Warning] Could not check/clean stale presentations: {dup_err}")
 
     # 1. Copy Master Slide Template to Target Mission Folder
     copy_body = {
@@ -227,6 +464,17 @@ def handle_generate_slide(folder_raw: str, mission_name: str, card: Any, templat
         body={"requests": requests}
     ).execute()
 
+    # Step 7: Record milestone into Central Status Tracker
+    try:
+        handle_log_pipeline_status(
+            mission_name=mission_name,
+            status="DECK_GENERATED",
+            deck_url=presentation_url,
+            notes="Executive one-pager slide deck generated"
+        )
+    except Exception as e:
+        print(f"[Tracker] Step 7 auto-log warning in generate_slide: {e}")
+
     return {
         "presentationId": presentation_id,
         "presentationUrl": presentation_url,
@@ -253,38 +501,108 @@ def handle_create_audit_sheet(folder_raw: str, mission_name: str, audit_records:
         audit_records = []
 
     sheet_title = f"[Checklist & Audit] {mission_name}"
+    tab_name = "Knowledge Audit"
 
-    # 1. Create Spreadsheet
-    ss_body = {
-        "properties": {"title": sheet_title},
-        "sheets": [{"properties": {"sheetId": 0, "title": "Knowledge Audit"}}]
-    }
-    ss = sheets_svc.spreadsheets().create(
-        body=ss_body,
-        fields="spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title))"
-    ).execute()
-    spreadsheet_id = ss["spreadsheetId"]
-    spreadsheet_url = ss.get("spreadsheetUrl", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
-    target_sheet_id = ss.get("sheets", [{}])[0].get("properties", {}).get("sheetId", 0)
+    # Deduplication: Check if an audit spreadsheet already exists in the mission folder
+    existing_files = []
+    try:
+        search_query = f"'{folder_id}' in parents and name = '{sheet_title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        res = drive_svc.files().list(
+            q=search_query,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            fields="files(id, name, webViewLink)"
+        ).execute()
+        existing_files = res.get("files", [])
+    except Exception as search_err:
+        print(f"[Audit Sheet Search Warning]: {search_err}")
 
-    # 2. Move Spreadsheet to Target Mission Folder
-    drive_svc.files().update(
-        fileId=spreadsheet_id,
-        addParents=folder_id,
-        removeParents="root",
-        supportsAllDrives=True,
-        fields="id, parents"
-    ).execute()
+    if existing_files:
+        # Reuse canonical existing spreadsheet
+        spreadsheet_id = existing_files[0]["id"]
+        spreadsheet_url = existing_files[0].get("webViewLink", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
+
+        # Clean up any duplicate spreadsheets created on previous runs
+        for extra in existing_files[1:]:
+            try:
+                drive_svc.files().delete(fileId=extra["id"], supportsAllDrives=True).execute()
+            except Exception:
+                pass
+
+        # Inspect tabs to locate Knowledge Audit sheetId
+        target_sheet_id = 0
+        try:
+            ss_meta = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            sheets_list = ss_meta.get("sheets", [])
+            tab_found = False
+            for s in sheets_list:
+                props = s.get("properties", {})
+                if props.get("title") == tab_name:
+                    target_sheet_id = props.get("sheetId", 0)
+                    tab_found = True
+                    break
+
+            if not tab_found and sheets_list:
+                target_sheet_id = sheets_list[0].get("properties", {}).get("sheetId", 0)
+                sheets_svc.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={"requests": [{
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": target_sheet_id, "title": tab_name},
+                            "fields": "title"
+                        }
+                    }]}
+                ).execute()
+
+            # Clear existing data on the tab to prevent residual stale rows
+            sheets_svc.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{tab_name}'!A:Z"
+            ).execute()
+        except Exception as inspect_err:
+            print(f"[Audit Sheet Reuse Warning]: {inspect_err}")
+
+    else:
+        # 1. Create Spreadsheet
+        ss_body = {
+            "properties": {"title": sheet_title},
+            "sheets": [{"properties": {"sheetId": 0, "title": tab_name}}]
+        }
+        ss = sheets_svc.spreadsheets().create(
+            body=ss_body,
+            fields="spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title))"
+        ).execute()
+        spreadsheet_id = ss["spreadsheetId"]
+        spreadsheet_url = ss.get("spreadsheetUrl", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
+        target_sheet_id = ss.get("sheets", [{}])[0].get("properties", {}).get("sheetId", 0)
+
+        # 2. Move Spreadsheet to Target Mission Folder
+        drive_svc.files().update(
+            fileId=spreadsheet_id,
+            addParents=folder_id,
+            removeParents="root",
+            supportsAllDrives=True,
+            fields="id, parents"
+        ).execute()
 
     # 3. Prepare Header & Rows
     values = [["Filename", "Confidentiality Risk", "Suggested Tags", "To Be Exported"]]
+    max_risk = "LOW"
+    risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    current_max_val = 1
+
     for item in audit_records:
         tags = item.get("suggestedTags", "")
         if isinstance(tags, list):
             tags = ", ".join(tags)
+        item_risk = str(item.get("confidentialityRisk", "MEDIUM")).upper()
+        if risk_rank.get(item_risk, 0) > current_max_val:
+            current_max_val = risk_rank.get(item_risk, 0)
+            max_risk = item_risk
+
         values.append([
             str(item.get("filename", "Unknown")),
-            str(item.get("confidentialityRisk", "MEDIUM")).upper(),
+            item_risk,
             str(tags),
             bool(item.get("toBeExported", False))
         ])
@@ -292,7 +610,7 @@ def handle_create_audit_sheet(folder_raw: str, mission_name: str, audit_records:
     # 4. Write Values
     sheets_svc.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
-        range="'Knowledge Audit'!A1:D",
+        range=f"'{tab_name}'!A1:D",
         valueInputOption="USER_ENTERED",
         body={"values": values}
     ).execute()
@@ -354,6 +672,18 @@ def handle_create_audit_sheet(folder_raw: str, mission_name: str, audit_records:
         body={"requests": format_requests}
     ).execute()
 
+    # Step 7: Record milestone into Central Status Tracker
+    try:
+        handle_log_pipeline_status(
+            mission_name=mission_name,
+            status="AUDIT_READY",
+            audit_url=spreadsheet_url,
+            risk=max_risk,
+            notes=f"Audit completed: {len(audit_records)} assets assessed"
+        )
+    except Exception as e:
+        print(f"[Tracker] Step 7 auto-log warning in create_audit_sheet: {e}")
+
     return {
         "spreadsheetId": spreadsheet_id,
         "spreadsheetUrl": spreadsheet_url,
@@ -409,6 +739,20 @@ def handle_send_notification(recipient_email: str, mission_name: str, slide_url:
         raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
         gmail_svc.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+
+        # Step 7: Record milestone into Central Status Tracker
+        try:
+            handle_log_pipeline_status(
+                mission_name=mission_name,
+                status="NOTIFIED_LEAD",
+                lead_email=recipient_email,
+                deck_url=slide_url,
+                audit_url=sheet_url,
+                notes=f"Debrief artifacts emailed to {recipient_email}"
+            )
+        except Exception as e:
+            print(f"[Tracker] Step 7 auto-log warning in send_notification: {e}")
+
         return {
             "status": "SENT",
             "recipientEmail": recipient_email,

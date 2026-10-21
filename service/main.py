@@ -18,6 +18,12 @@ from eom_agent.bigquery_service import (
     query_upcoming_missions,
     detect_and_launch_upcoming_missions
 )
+from eom_agent.workspace_service import (
+    check_debrief_doc_completion,
+    build_reminder_email_html,
+    handle_send_reminder,
+    scan_and_send_reminders
+)
 
 import google.auth
 from google.oauth2.credentials import Credentials
@@ -1537,6 +1543,98 @@ class LogPipelineStatusRequest(BaseModel):
     def get_folder_url(self) -> Optional[str]:
         return self.folderUrl or self.folder_url
 
+class CheckDebriefStatusRequest(BaseModel):
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+
+    def get_target_id(self) -> str:
+        tid = self.docId or self.doc_id or self.folderId or self.folder_id or self.missionName or self.mission_name
+        if not tid:
+            raise ValueError("docId, folderId, or missionName is required")
+        return tid
+
+class SendReminderRequest(BaseModel):
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    client: Optional[str] = None
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    daysRemaining: Optional[int] = 3
+    days_remaining: Optional[int] = None
+    deadlineDate: Optional[str] = None
+    deadline_date: Optional[str] = None
+    overrideLeadEmail: Optional[str] = None
+    override_lead_email: Optional[str] = None
+    dryRun: Optional[bool] = False
+    dry_run: Optional[bool] = None
+    industry: Optional[str] = None
+    trackerId: Optional[str] = None
+    tracker_id: Optional[str] = None
+
+    def get_mission_name(self) -> str:
+        name = self.missionName or self.mission_name
+        if not name:
+            raise ValueError("missionName or mission_name is required")
+        return name
+
+    def get_lead_email(self) -> str:
+        em = self.leadEmail or self.lead_email
+        if not em:
+            raise ValueError("leadEmail or lead_email is required")
+        return em
+
+    def get_days_remaining(self) -> int:
+        return self.days_remaining if self.days_remaining is not None else (self.daysRemaining or 3)
+
+    def get_dry_run(self) -> bool:
+        if self.dry_run is not None:
+            return self.dry_run
+        return self.dryRun if self.dryRun is not None else False
+
+    def get_override_lead_email(self) -> Optional[str]:
+        return self.overrideLeadEmail or self.override_lead_email
+
+class TriggerRemindersRequest(BaseModel):
+    daysAhead: Optional[int] = None
+    days_ahead: Optional[int] = None
+    forceSend: Optional[bool] = False
+    force_send: Optional[bool] = None
+    dryRun: Optional[bool] = False
+    dry_run: Optional[bool] = None
+    overrideLeadEmail: Optional[str] = None
+    override_lead_email: Optional[str] = None
+    trackerId: Optional[str] = None
+    tracker_id: Optional[str] = None
+    limit: Optional[int] = 20
+
+    def get_days_ahead(self) -> Optional[int]:
+        return self.days_ahead if self.days_ahead is not None else self.daysAhead
+
+    def get_force_send(self) -> bool:
+        if self.force_send is not None:
+            return self.force_send
+        return self.forceSend if self.forceSend is not None else False
+
+    def get_dry_run(self) -> bool:
+        if self.dry_run is not None:
+            return self.dry_run
+        return self.dryRun if self.dryRun is not None else False
+
+    def get_override_lead_email(self) -> Optional[str]:
+        return self.overrideLeadEmail or self.override_lead_email
+
+    def get_tracker_id(self) -> Optional[str]:
+        return self.trackerId or self.tracker_id
+
+
 @app.get("/")
 @app.get("/healthz")
 def health_check():
@@ -1606,6 +1704,46 @@ def api_launch_mission(req: LaunchMissionRequest):
             deadline_date=req.get_deadline_date(),
             notes=req.notes,
             industry=req.industry
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/missions/check-debrief", operation_id="check_mission_debrief_status")
+def api_check_debrief(req: CheckDebriefStatusRequest):
+    try:
+        return check_debrief_doc_completion(req.get_target_id())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/send-reminder", operation_id="send_mission_reminder")
+def api_send_reminder(req: SendReminderRequest):
+    try:
+        return handle_send_reminder(
+            mission_name=req.get_mission_name(),
+            lead_email=req.get_lead_email(),
+            client=req.client,
+            doc_id=req.docId or req.doc_id,
+            folder_id=req.folderId or req.folder_id,
+            days_remaining=req.get_days_remaining(),
+            deadline_date=req.deadlineDate or req.deadline_date,
+            override_lead_email=req.get_override_lead_email(),
+            dry_run=req.get_dry_run(),
+            industry=req.industry,
+            tracker_id=req.trackerId or req.tracker_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/missions/reminders", operation_id="trigger_eom_reminders")
+def api_trigger_reminders(req: TriggerRemindersRequest):
+    try:
+        return scan_and_send_reminders(
+            days_ahead=req.get_days_ahead(),
+            force_send=req.get_force_send(),
+            dry_run=req.get_dry_run(),
+            override_lead_email=req.get_override_lead_email(),
+            tracker_id=req.get_tracker_id(),
+            limit=req.limit or 20
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

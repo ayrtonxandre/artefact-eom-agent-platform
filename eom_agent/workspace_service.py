@@ -790,6 +790,577 @@ def handle_launch_mission(
     }
 
 
+def check_debrief_doc_completion(target_id_or_url: str, creds=None) -> Dict[str, Any]:
+    """
+    Step 3 in Target EOM Process: Inspects a Google Doc (or mission folder) to verify debrief completion.
+    Analyzes the 3 core pillars (Challenge, Solution, Results) for remaining template placeholders
+    and substantive written content.
+
+    Returns:
+        Dict with keys:
+            docId: Google Doc ID
+            docName: Document title
+            docUrl: Web edit link
+            isCompleted: True if all 3 sections are filled and placeholders removed
+            completionRate: Float between 0.0 and 1.0 (e.g. 0.67 if 2 of 3 filled)
+            completedSections: List of completed section names (e.g. ["Challenge"])
+            missingSections: List of incomplete section names (e.g. ["Solution", "Results"])
+            sections: Detailed status per section (filled, character count, preview)
+            totalCharacters: Substantive content character count
+    """
+    drive_svc = get_drive_service(creds)
+    raw_id = parse_folder_id(target_id_or_url)
+    
+    # 1. Resolve whether input is Folder or Document
+    doc_id = None
+    doc_name = ""
+    try:
+        meta = drive_svc.files().get(
+            fileId=raw_id,
+            fields="id, name, mimeType, webViewLink",
+            supportsAllDrives=True
+        ).execute()
+        
+        mime = meta.get("mimeType", "")
+        if mime == "application/vnd.google-apps.folder":
+            # Search for debrief doc inside folder
+            q = f"'{raw_id}' in parents and mimeType = 'application/vnd.google-apps.document' and trashed = false"
+            res = drive_svc.files().list(
+                q=q,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                fields="files(id, name, webViewLink)"
+            ).execute()
+            files = res.get("files", [])
+            if not files:
+                return {
+                    "docId": None,
+                    "docName": None,
+                    "docUrl": None,
+                    "isCompleted": False,
+                    "completionRate": 0.0,
+                    "completedSections": [],
+                    "missingSections": ["Challenge", "Solution", "Results"],
+                    "sections": {},
+                    "totalCharacters": 0,
+                    "error": f"No Google Doc found in folder {raw_id}"
+                }
+            # Prefer doc starting with [Debrief
+            debrief_files = [f for f in files if "[Debrief" in f.get("name", "")]
+            target_doc = debrief_files[0] if debrief_files else files[0]
+            doc_id = target_doc["id"]
+            doc_name = target_doc["name"]
+        else:
+            doc_id = meta["id"]
+            doc_name = meta["name"]
+    except Exception as e:
+        return {
+            "docId": raw_id,
+            "isCompleted": False,
+            "completionRate": 0.0,
+            "completedSections": [],
+            "missingSections": ["Challenge", "Solution", "Results"],
+            "sections": {},
+            "totalCharacters": 0,
+            "error": f"Could not inspect document or folder: {e}"
+        }
+
+    # 2. Export text content via Google Drive API
+    try:
+        raw_data = drive_svc.files().export(fileId=doc_id, mimeType="text/plain").execute()
+        doc_text = raw_data.decode("utf-8", errors="ignore")
+    except Exception as exp_err:
+        return {
+            "docId": doc_id,
+            "docName": doc_name,
+            "docUrl": f"https://docs.google.com/document/d/{doc_id}/edit",
+            "isCompleted": False,
+            "completionRate": 0.0,
+            "completedSections": [],
+            "missingSections": ["Challenge", "Solution", "Results"],
+            "sections": {},
+            "totalCharacters": 0,
+            "error": f"Failed to export Google Doc text: {exp_err}"
+        }
+
+    # 3. Helper to parse section content between headers
+    def extract_section_text(text: str, start_pattern: str, end_pattern: Optional[str]) -> str:
+        m_start = re.search(start_pattern, text, re.IGNORECASE)
+        if not m_start:
+            return ""
+        sub = text[m_start.end():]
+        if end_pattern:
+            m_end = re.search(end_pattern, sub, re.IGNORECASE)
+            if m_end:
+                sub = sub[:m_end.start()]
+        return sub.strip()
+
+    c_raw = extract_section_text(doc_text, r"1\.\s*Challenge", r"2\.\s*Solution")
+    s_raw = extract_section_text(doc_text, r"2\.\s*Solution", r"3\.\s*Results")
+    r_raw = extract_section_text(doc_text, r"3\.\s*Results", r"4\.\s*Visuels")
+
+    def analyze_section(section_raw: str, placeholder_regex: str, min_chars: int = 25) -> Dict[str, Any]:
+        has_placeholder = bool(re.search(placeholder_regex, section_raw, re.IGNORECASE))
+        
+        # Clean guidance prompts and bullet questions
+        cleaned = re.sub(r"^\s*\([^\)]+\)", "", section_raw).strip()
+        cleaned = re.sub(r"Questions guides\s*:[\s\S]*?(?=\r?\n\r?\n|\[|[A-Z0-9À-ÖØ-öø-ÿ]|$)", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^\s*[\*\-•][^\r\n]+", "", cleaned, flags=re.MULTILINE).strip()
+        user_content = re.sub(placeholder_regex, "", cleaned, flags=re.IGNORECASE).strip()
+        
+        user_len = len(user_content)
+        filled = (not has_placeholder) and (user_len >= min_chars)
+        preview = user_content[:150].replace("\r", " ").replace("\n", " ").strip()
+        
+        return {
+            "filled": filled,
+            "hasPlaceholder": has_placeholder,
+            "characterCount": user_len,
+            "preview": preview if filled else ""
+        }
+
+    c_stat = analyze_section(c_raw, r"\[Rédigez ici[^\]]*\]")
+    s_stat = analyze_section(s_raw, r"\[Détaillez ici[^\]]*\]")
+    r_stat = analyze_section(r_raw, r"\[Indiquez ici[^\]]*\]")
+
+    sections = {
+        "Challenge": c_stat,
+        "Solution": s_stat,
+        "Results": r_stat
+    }
+
+    completed_sections = [name for name, stat in sections.items() if stat["filled"]]
+    missing_sections = [name for name, stat in sections.items() if not stat["filled"]]
+    is_completed = (len(missing_sections) == 0)
+    completion_rate = round(len(completed_sections) / 3.0, 2)
+    total_chars = sum(stat["characterCount"] for stat in sections.values())
+
+    return {
+        "docId": doc_id,
+        "docName": doc_name,
+        "docUrl": f"https://docs.google.com/document/d/{doc_id}/edit",
+        "isCompleted": is_completed,
+        "completionRate": completion_rate,
+        "completedSections": completed_sections,
+        "missingSections": missing_sections,
+        "sections": sections,
+        "totalCharacters": total_chars
+    }
+
+
+def build_reminder_email_html(
+    mission_name: str,
+    client: str,
+    lead_email: str,
+    days_remaining: int,
+    deadline_str: str,
+    doc_url: str,
+    visuals_url: str,
+    folder_url: str,
+    folder_name: str,
+    missing_sections: List[str],
+    completion_rate: float,
+    industry: Optional[str] = None
+) -> str:
+    """Generates corporate Artefact reminder email in HTML format for J-3 / J-1 relances."""
+    sub_info = f"Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong>"
+    if industry:
+        sub_info += f" | Secteur : <strong>{industry}</strong>"
+
+    # Dynamic urgency badge & theme
+    if days_remaining <= 1:
+        badge_bg = "#dc2626"
+        badge_text = "🚨 DERNIER RAPPEL J-1 • CLÔTURE DEMAIN"
+        urgency_msg = f"Votre mission se termine <strong>demain ({deadline_str})</strong>."
+    else:
+        badge_bg = "#d97706"
+        badge_text = f"⏳ RAPPEL J-3 • PLUS QUE {days_remaining} JOURS"
+        urgency_msg = f"Votre mission approche de son terme dans <strong>{days_remaining} jours ({deadline_str})</strong>."
+
+    pct_display = int(completion_rate * 100)
+    missing_display = ", ".join(missing_sections) if missing_sections else "Validation finale"
+
+    missing_bullets = ""
+    for sec in missing_sections:
+        desc = ""
+        if sec == "Challenge":
+            desc = "Contexte client, enjeux stratégiques & problématiques initiales"
+        elif sec == "Solution":
+            desc = "Architecture technique déployée, stack IA/Data & livrables Artefact"
+        elif sec == "Results":
+            desc = "Métriques chiffrées, ROI, impact business & sponsors feedback"
+        missing_bullets += f"<li style='margin-bottom: 6px;'><strong>{sec} :</strong> {desc}</li>"
+
+    return f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; line-height: 1.6;">
+      <div style="background-color: #0f172a; padding: 24px; border-radius: 8px 8px 0 0; text-align: left;">
+        <span style="background-color: {badge_bg}; color: #ffffff; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">{badge_text}</span>
+        <h1 style="color: #ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Relance : Débrief One-Pager en attente</h1>
+        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">{sub_info}</p>
+      </div>
+      
+      <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;">
+        <p style="font-size: 15px; margin-top: 0;">Bonjour {lead_email},</p>
+        <p>{urgency_msg} Afin de générer le <strong>One-Pager exécutif Google Slides</strong> valorisant la mission auprès du leadership Artefact et d'indexer vos livrables, merci de finaliser le support de débrief.</p>
+        
+        <!-- Progress bar -->
+        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 18px; margin: 18px 0;">
+          <div style="display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px;">
+            <span><strong>État d'avancement du Débrief :</strong></span>
+            <span style="font-weight: bold; color: {badge_bg};">{pct_display}% complété</span>
+          </div>
+          <div style="width: 100%; background-color: #e2e8f0; height: 10px; border-radius: 5px; overflow: hidden;">
+            <div style="width: {pct_display}%; background-color: {'#16a34a' if pct_display >= 100 else '#1a73e8'}; height: 100%;"></div>
+          </div>
+        </div>
+
+        <div style="background-color: #fff7ed; border-left: 4px solid #f97316; padding: 14px 18px; margin: 20px 0; border-radius: 4px;">
+          <h3 style="margin: 0 0 8px 0; color: #9a3412; font-size: 15px;">⚠️ Sections restant à compléter :</h3>
+          <ul style="margin: 0; padding-left: 20px; font-size: 14px; color: #431407;">
+            {missing_bullets}
+          </ul>
+        </div>
+
+        <!-- Call to Action Buttons -->
+        <table style="width: 100%; margin: 25px 0;" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="padding-right: 8px; width: 50%;">
+              <a href="{doc_url}" target="_blank" style="display: block; text-align: center; background-color: #1a73e8; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
+                📄 Compléter le Google Doc Debrief &rarr;
+              </a>
+            </td>
+            <td style="padding-left: 8px; width: 50%;">
+              <a href="{visuals_url}" target="_blank" style="display: block; text-align: center; background-color: #0f172a; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
+                🖼️ Déposer les Visuels & Schémas &rarr;
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <div style="background-color: #f1f5f9; padding: 12px 16px; border-radius: 6px; font-size: 13px; color: #475569;">
+          📁 <strong>Dossier Drive de la Mission :</strong> <a href="{folder_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">{folder_name}</a><br>
+          🤖 <strong>Dès que vos 3 sections sont remplies</strong>, le pipeline autonome génère automatiquement votre One-Pager exécutif et la checklist d'audit.
+        </div>
+
+        <p style="font-size: 12px; color: #94a3b8; margin-top: 25px; margin-bottom: 0; text-align: center;">
+          Artefact End-of-Mission Automation • Relance automatique générée par l'agent IA EOM
+        </p>
+      </div>
+    </div>
+    """
+
+
+def handle_send_reminder(
+    mission_name: str,
+    lead_email: str,
+    client: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    days_remaining: int = 3,
+    deadline_date: Optional[str] = None,
+    override_lead_email: Optional[str] = None,
+    team_emails: Optional[Any] = None,
+    dry_run: bool = False,
+    industry: Optional[str] = None,
+    tracker_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Step 3 in Target EOM Process: Sends automated reminder email (J-3 or J-1) to the mission lead.
+    1. Inspects the debrief Google Doc completion.
+    2. If debrief doc is already 100% completed, updates tracker to DEBRIEF_COMPLETED and skips email.
+    3. If incomplete, dispatches branded Artefact reminder HTML email with missing sections callout.
+    4. Updates Central Pipeline Status Tracker milestone (REMINDER_J3 or REMINDER_J1).
+    """
+    creds = get_credentials()
+    drive_svc = get_drive_service(creds)
+    gmail_svc = get_gmail_service(creds)
+
+    clean_mission = mission_name.strip()
+    clean_client = (client or clean_mission.replace("Mission", "").replace("[", "").replace("]", "").strip()).strip()
+    clean_lead = lead_email.strip()
+    recipient_email = (override_lead_email or clean_lead).strip()
+
+    # Determine deadline string
+    if deadline_date:
+        deadline_str = str(deadline_date).strip()
+    else:
+        deadline_str = (datetime.now() + timedelta(days=days_remaining)).strftime("%d/%m/%Y")
+
+    # 1. Resolve doc & folder IDs
+    target_doc_id = doc_id
+    mission_folder_id = folder_id
+    folder_name = clean_mission
+    folder_url = ""
+    visuals_url = ""
+
+    if not target_doc_id and folder_id:
+        f_clean = parse_folder_id(folder_id)
+        mission_folder_id = f_clean
+        doc_inspect = check_debrief_doc_completion(f_clean, creds=creds)
+        target_doc_id = doc_inspect.get("docId")
+
+    if not mission_folder_id and target_doc_id:
+        try:
+            doc_meta = drive_svc.files().get(
+                fileId=target_doc_id,
+                fields="parents, webViewLink",
+                supportsAllDrives=True
+            ).execute()
+            parents = doc_meta.get("parents", [])
+            if parents:
+                mission_folder_id = parents[0]
+        except Exception:
+            pass
+
+    if mission_folder_id:
+        folder_url = f"https://drive.google.com/drive/folders/{mission_folder_id}"
+        # Locate visuals subfolder
+        try:
+            q_vis = f"'{mission_folder_id}' in parents and name = '01_Visuals & Diagrams' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res_vis = drive_svc.files().list(q=q_vis, supportsAllDrives=True, fields="files(id, webViewLink)").execute()
+            v_files = res_vis.get("files", [])
+            if v_files:
+                visuals_url = v_files[0].get("webViewLink", folder_url)
+        except Exception:
+            visuals_url = folder_url
+    else:
+        visuals_url = folder_url
+
+    # 2. Inspect document completion
+    doc_inspect = check_debrief_doc_completion(target_doc_id or mission_folder_id, creds=creds) if (target_doc_id or mission_folder_id) else {}
+    is_completed = doc_inspect.get("isCompleted", False)
+    missing_sections = doc_inspect.get("missingSections", ["Challenge", "Solution", "Results"])
+    completion_rate = doc_inspect.get("completionRate", 0.0)
+    doc_url = doc_inspect.get("docUrl", f"https://docs.google.com/document/d/{target_doc_id}/edit" if target_doc_id else "")
+
+    # If already completed, update tracker and do not spam lead
+    if is_completed:
+        log_notes = f"Debrief Doc verified 100% completed ({doc_inspect.get('totalCharacters', 0)} chars). Ready for One-Pager generation."
+        handle_log_pipeline_status(
+            mission_name=clean_mission,
+            status="DEBRIEF_COMPLETED",
+            client=clean_client,
+            lead_email=clean_lead,
+            folder_url=folder_url,
+            notes=log_notes,
+            tracker_id=tracker_id
+        )
+        return {
+            "status": "DEBRIEF_COMPLETED",
+            "action": "SKIPPED_ALREADY_COMPLETED",
+            "missionName": clean_mission,
+            "leadEmail": clean_lead,
+            "completionRate": 1.0,
+            "message": "Debrief Doc is fully completed. No reminder email needed."
+        }
+
+    # 3. Urgency milestone
+    milestone_status = "REMINDER_J1" if days_remaining <= 1 else "REMINDER_J3"
+
+    if dry_run:
+        return {
+            "status": "SIMULATED",
+            "action": "SIMULATED_REMINDER_READY",
+            "missionName": clean_mission,
+            "client": clean_client,
+            "leadEmail": recipient_email,
+            "daysRemaining": days_remaining,
+            "milestone": milestone_status,
+            "missingSections": missing_sections,
+            "completionRate": completion_rate,
+            "docUrl": doc_url
+        }
+
+    # 4. Dispatch Email via Gmail API
+    email_status = "NOT_SENT"
+    try:
+        email_html = build_reminder_email_html(
+            mission_name=clean_mission,
+            client=clean_client,
+            lead_email=recipient_email,
+            days_remaining=days_remaining,
+            deadline_str=deadline_str,
+            doc_url=doc_url,
+            visuals_url=visuals_url or folder_url,
+            folder_url=folder_url,
+            folder_name=folder_name,
+            missing_sections=missing_sections,
+            completion_rate=completion_rate,
+            industry=industry
+        )
+        msg = MIMEText(email_html, "html")
+        msg["to"] = recipient_email
+        reminder_tag = "J-1" if days_remaining <= 1 else "J-3"
+        msg["subject"] = f"[{reminder_tag} EOM] Relance Débrief One-Pager - {clean_mission}"
+        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        gmail_svc.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        email_status = "SENT"
+    except Exception as mail_err:
+        print(f"[Reminder] Email send error: {mail_err}")
+        email_status = f"FAILED: {mail_err}"
+
+    # 5. Update milestone in Central Status Tracker
+    tracker_note = f"Relance {milestone_status} envoyée à {recipient_email}. Manque : {', '.join(missing_sections)}"
+    if override_lead_email:
+        tracker_note += f" (Lead réel: {clean_lead})"
+
+    try:
+        handle_log_pipeline_status(
+            mission_name=clean_mission,
+            status=milestone_status,
+            client=clean_client,
+            lead_email=clean_lead,
+            folder_url=folder_url,
+            notes=tracker_note,
+            tracker_id=tracker_id
+        )
+    except Exception as log_err:
+        print(f"[Reminder] Status logging warning: {log_err}")
+
+    return {
+        "status": milestone_status,
+        "action": "REMINDER_SENT",
+        "missionName": clean_mission,
+        "client": clean_client,
+        "leadEmail": recipient_email,
+        "daysRemaining": days_remaining,
+        "missingSections": missing_sections,
+        "completionRate": completion_rate,
+        "docUrl": doc_url,
+        "emailStatus": email_status
+    }
+
+
+def scan_and_send_reminders(
+    target_days: Optional[List[int]] = None,
+    days_ahead: Optional[int] = None,
+    force_send: bool = False,
+    dry_run: bool = False,
+    override_lead_email: Optional[str] = None,
+    tracker_id: Optional[str] = None,
+    limit: int = 20
+) -> Dict[str, Any]:
+    """
+    Automated Step 3 Scanner: Scans Central Pipeline Status Tracker for active missions (LAUNCHED, REMINDER_J3),
+    verifies debrief completion status, and dispatches J-3 / J-1 reminders to mission managers.
+    """
+    from .bigquery_service import query_mission_by_id_or_name
+
+    creds = get_credentials()
+    sheets_svc = get_sheets_service(creds)
+    target_tracker_id = tracker_id or os.environ.get("CENTRAL_TRACKER_ID", DEFAULT_TRACKER_ID)
+
+    allowed_target_days = [days_ahead] if days_ahead is not None else (target_days or [1, 3])
+
+    # 1. Fetch rows from Central Status Tracker
+    try:
+        res = sheets_svc.spreadsheets().values().get(
+            spreadsheetId=target_tracker_id,
+            range=f"'{CENTRAL_TRACKER_TAB}'!A:J"
+        ).execute()
+        rows = res.get("values", [])
+    except Exception as e:
+        return {"status": "FAILED", "error": f"Could not read tracker sheet: {e}"}
+
+    if not rows or len(rows) <= 1:
+        return {"status": "COMPLETED", "message": "No tracked missions found.", "processed": []}
+
+    processed_missions = []
+    reminders_sent = 0
+    debriefs_completed = 0
+    skipped_count = 0
+
+    today = datetime.now().date()
+
+    for r in rows[1:]:
+        if len(processed_missions) >= limit:
+            break
+        if not r or not r[0].strip():
+            continue
+
+        m_name = r[0].strip()
+        m_client = r[1] if len(r) > 1 else ""
+        m_lead = r[2] if len(r) > 2 else ""
+        m_status = r[3] if len(r) > 3 else ""
+        m_folder_url = r[6] if len(r) > 6 else ""
+        m_notes = r[9] if len(r) > 9 else ""
+
+        # Only process missions awaiting debrief input
+        if m_status not in ("LAUNCHED", "REMINDER_J3"):
+            continue
+
+        # 2. Determine remaining days
+        days_remaining = None
+        bq_meta = query_mission_by_id_or_name(m_name)
+        if bq_meta and bq_meta.get("days_until_end") is not None:
+            days_remaining = int(bq_meta["days_until_end"])
+        else:
+            # Try to parse deadline from notes e.g. "Deadline: 28/10/2026"
+            match_dl = re.search(r"(\d{2}/\d{2}/\d{4})", m_notes)
+            if match_dl:
+                try:
+                    dt = datetime.strptime(match_dl.group(1), "%d/%m/%Y").date()
+                    days_remaining = (dt - today).days
+                except Exception:
+                    pass
+
+        if days_remaining is None:
+            days_remaining = 3  # Fallback default
+
+        # 3. Check if due for reminder
+        is_due = force_send
+        target_reminder_tier = 1 if days_remaining <= 1 else 3
+
+        if not is_due:
+            if target_reminder_tier in allowed_target_days:
+                if target_reminder_tier == 1 and m_status != "REMINDER_J1":
+                    is_due = True
+                elif target_reminder_tier == 3 and m_status == "LAUNCHED":
+                    is_due = True
+
+        if not is_due:
+            skipped_count += 1
+            processed_missions.append({
+                "missionName": m_name,
+                "status": m_status,
+                "daysRemaining": days_remaining,
+                "action": "SKIPPED_NOT_DUE"
+            })
+            continue
+
+        # 4. Dispatch or simulate reminder
+        folder_id = parse_folder_id(m_folder_url) if m_folder_url else None
+        rem_res = handle_send_reminder(
+            mission_name=m_name,
+            lead_email=m_lead,
+            client=m_client,
+            folder_id=folder_id,
+            days_remaining=days_remaining,
+            override_lead_email=override_lead_email,
+            dry_run=dry_run,
+            tracker_id=target_tracker_id
+        )
+
+        if rem_res.get("status") == "DEBRIEF_COMPLETED":
+            debriefs_completed += 1
+        elif rem_res.get("action") == "REMINDER_SENT" or rem_res.get("action") == "SIMULATED_REMINDER_READY":
+            reminders_sent += 1
+
+        processed_missions.append(rem_res)
+
+    return {
+        "status": "COMPLETED",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "totalChecked": len(rows) - 1,
+        "remindersSent": reminders_sent,
+        "debriefsCompleted": debriefs_completed,
+        "skippedCount": skipped_count,
+        "dryRun": dry_run,
+        "missions": processed_missions
+    }
+
+
 def handle_extract_documents(folder_raw: str) -> Dict[str, Any]:
     folder_id = parse_folder_id(folder_raw)
     drive_svc = get_drive_service()

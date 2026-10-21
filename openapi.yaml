@@ -171,6 +171,126 @@ paths:
                   emailStatus:
                     type: string
 
+  /missions/check-debrief:
+    post:
+      operationId: check_mission_debrief_status
+      summary: Step 3 - Checks debrief Google Doc completion and placeholder removal
+      description: Inspects a mission Google Doc or folder to analyze the 3 pillars (Challenge, Solution, Results) for completed content.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                docId:
+                  type: string
+                  description: Google Doc ID or URL
+                folderId:
+                  type: string
+                  description: Google Drive mission folder ID or URL
+                missionName:
+                  type: string
+                  description: Mission name
+      responses:
+        '200':
+          description: Debrief completion analysis.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  docId:
+                    type: string
+                  isCompleted:
+                    type: boolean
+                  completionRate:
+                    type: number
+                  completedSections:
+                    type: array
+                    items:
+                      type: string
+                  missingSections:
+                    type: array
+                    items:
+                      type: string
+
+  /send-reminder:
+    post:
+      operationId: send_mission_reminder
+      summary: Step 3 - Sends J-3 or J-1 reminder email to mission lead if debrief is incomplete
+      description: Evaluates debrief completion, dispatches corporate Artefact reminder HTML email, and updates Central Status Tracker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - missionName
+                - leadEmail
+              properties:
+                missionName:
+                  type: string
+                leadEmail:
+                  type: string
+                client:
+                  type: string
+                folderId:
+                  type: string
+                docId:
+                  type: string
+                daysRemaining:
+                  type: integer
+                  default: 3
+                deadlineDate:
+                  type: string
+                overrideLeadEmail:
+                  type: string
+                dryRun:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Reminder execution result.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /missions/reminders:
+    post:
+      operationId: trigger_eom_reminders
+      summary: Step 3 - Automated Batch Reminder Scanner
+      description: Scans Central Pipeline Status Tracker for active missions (LAUNCHED, REMINDER_J3), inspects debrief doc completion, and dispatches J-3 / J-1 reminders.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                daysAhead:
+                  type: integer
+                forceSend:
+                  type: boolean
+                  default: false
+                dryRun:
+                  type: boolean
+                  default: false
+                overrideLeadEmail:
+                  type: string
+                limit:
+                  type: integer
+                  default: 20
+      responses:
+        '200':
+          description: Batch reminder report.
+          content:
+            application/json:
+              schema:
+                type: object
+
   /extract-documents:
     post:
       operationId: extract_folder_documents

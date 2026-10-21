@@ -123,6 +123,114 @@
       }
     },
     {
+      "name": "check_mission_debrief_status",
+      "description": "Step 3: Inspects a mission Google Doc or folder to verify debrief completion (Challenge, Solution, Results) and detect placeholder removal.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "docId": {
+            "type": "string",
+            "description": "Google Doc ID, Drive folder ID, or full URL"
+          }
+        },
+        "required": [
+          "docId"
+        ]
+      },
+      "annotations": {
+        "title": "Check Mission Debrief Status",
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "send_mission_reminder",
+      "description": "Step 3: Dispatches an automated reminder email (J-3 or J-1) to the mission lead if the debrief Google Doc is incomplete, and logs milestone in the tracker.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission"
+          },
+          "leadEmail": {
+            "type": "string",
+            "description": "Email address of the mission delivery lead"
+          },
+          "client": {
+            "type": "string",
+            "description": "Client company name"
+          },
+          "folderId": {
+            "type": "string",
+            "description": "Optional Google Drive mission folder ID"
+          },
+          "docId": {
+            "type": "string",
+            "description": "Optional debrief Google Doc ID"
+          },
+          "daysRemaining": {
+            "type": "integer",
+            "description": "Days remaining until project completion (default 3)"
+          },
+          "deadlineDate": {
+            "type": "string",
+            "description": "Target completion date (DD/MM/YYYY)"
+          },
+          "overrideLeadEmail": {
+            "type": "string",
+            "description": "Optional email to redirect notification during testing"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "If True, simulates reminder without sending email"
+          }
+        },
+        "required": [
+          "missionName",
+          "leadEmail"
+        ]
+      },
+      "annotations": {
+        "title": "Send Mission Reminder",
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "trigger_eom_reminders",
+      "description": "Step 3: Autonomous Batch Reminder Engine. Scans Central Status Tracker for active missions (LAUNCHED, REMINDER_J3), inspects debrief doc completion, and dispatches J-3 / J-1 reminders.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "daysAhead": {
+            "type": "integer",
+            "description": "Optional specific day horizon to trigger (e.g. 3 for J-3, 1 for J-1)"
+          },
+          "forceSend": {
+            "type": "boolean",
+            "description": "If True, triggers reminder dispatch for active missions regardless of date"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "If True, simulates scan and reminder preview without sending emails"
+          },
+          "overrideLeadEmail": {
+            "type": "string",
+            "description": "Optional email to redirect notifications during testing"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max number of missions to process"
+          }
+        }
+      },
+      "annotations": {
+        "title": "Trigger EOM Reminders Engine",
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
       "name": "extract_folder_documents",
       "description": "Extracts document contents, file metadata, and mission context from a Google Drive mission folder.",
       "inputSchema": {

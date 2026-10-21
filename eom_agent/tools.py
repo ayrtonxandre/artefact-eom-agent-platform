@@ -8,6 +8,9 @@ from typing import Dict, Any, List, Optional
 
 from .workspace_service import (
     handle_launch_mission,
+    check_debrief_doc_completion,
+    handle_send_reminder,
+    scan_and_send_reminders,
     handle_extract_documents,
     handle_generate_slide,
     handle_create_audit_sheet,
@@ -151,6 +154,100 @@ def launch_mission_kickoff(
         parent_folder_id=parent_folder_id,
         deadline_date=deadline_date,
         industry=industry,
+    )
+
+
+def check_mission_debrief_status(doc_id_or_folder_id: str) -> Dict[str, Any]:
+    """
+    Step 3 in Artefact Target EOM Process: Inspects a mission Google Doc (or mission Drive folder)
+    to verify completion of the 3-pillar debrief (Challenge, Solution, Results).
+    Detects whether template placeholder text has been replaced with substantive content.
+    
+    Args:
+        doc_id_or_folder_id: Google Doc ID, Google Drive folder ID, or full web URL.
+        
+    Returns:
+        Dictionary with docId, docName, isCompleted (bool), completionRate (float 0.0 to 1.0),
+        completedSections (list), missingSections (list), and section details.
+    """
+    return check_debrief_doc_completion(doc_id_or_folder_id)
+
+
+def send_mission_reminder(
+    mission_name: str,
+    lead_email: str,
+    client: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    days_remaining: int = 3,
+    deadline_date: Optional[str] = None,
+    override_lead_email: Optional[str] = None,
+    dry_run: bool = False,
+    industry: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Step 3 in Artefact Target EOM Process: Dispatches an automated reminder email (J-3 or J-1)
+    to the mission delivery lead if the debrief Google Doc is incomplete.
+    If the document is already 100% completed, updates the central tracker to DEBRIEF_COMPLETED and skips email.
+    
+    Args:
+        mission_name: Name of the mission (e.g. Clariane, Crédit Agricole).
+        lead_email: Email address of the mission delivery lead.
+        client: Client company name.
+        doc_id: Optional Google Doc ID of the debrief document.
+        folder_id: Optional Google Drive mission workspace folder ID.
+        days_remaining: Days until project end (e.g. 3 for J-3, 1 for J-1).
+        deadline_date: Optional target completion date string (DD/MM/YYYY).
+        override_lead_email: Optional email to redirect notifications during testing (e.g. user email).
+        dry_run: If True, simulates reminder dispatch without sending email or modifying tracker.
+        industry: Optional client industry sector.
+        
+    Returns:
+        Execution dictionary with status, action, leadEmail, missingSections, completionRate, and emailStatus.
+    """
+    return handle_send_reminder(
+        mission_name=mission_name,
+        lead_email=lead_email,
+        client=client,
+        doc_id=doc_id,
+        folder_id=folder_id,
+        days_remaining=days_remaining,
+        deadline_date=deadline_date,
+        override_lead_email=override_lead_email,
+        dry_run=dry_run,
+        industry=industry
+    )
+
+
+def trigger_eom_reminders(
+    days_ahead: Optional[int] = None,
+    force_send: bool = False,
+    dry_run: bool = False,
+    override_lead_email: Optional[str] = None,
+    limit: int = 20
+) -> Dict[str, Any]:
+    """
+    Step 3 in Artefact Target EOM Process: Autonomous Batch Reminder Engine.
+    Scans the Central Pipeline Status Tracker for all active missions awaiting debrief (status LAUNCHED or REMINDER_J3).
+    Evaluates debrief completion in Google Drive, and dispatches J-3 / J-1 reminders for incomplete missions
+    while logging updated milestones in the Central Status Tracker sheet.
+    
+    Args:
+        days_ahead: Optional specific day horizon to trigger (e.g. 3 for J-3, 1 for J-1). If omitted, evaluates both.
+        force_send: If True, triggers reminder dispatch for active missions regardless of calculated date.
+        dry_run: If True, simulates scan and reminder preview without sending emails or updating the tracker.
+        override_lead_email: Optional email to redirect notifications during testing (e.g. user email).
+        limit: Max number of missions to process in one execution run.
+        
+    Returns:
+        Summary dict containing status, totalChecked, remindersSent, debriefsCompleted, skippedCount, and missions array.
+    """
+    return scan_and_send_reminders(
+        days_ahead=days_ahead,
+        force_send=force_send,
+        dry_run=dry_run,
+        override_lead_email=override_lead_email,
+        limit=limit
     )
 
 

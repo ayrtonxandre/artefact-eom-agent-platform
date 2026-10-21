@@ -8,6 +8,9 @@ from .tools import (
     fetch_ended_missions,
     fetch_mission_financials,
     launch_mission_kickoff,
+    check_mission_debrief_status,
+    send_mission_reminder,
+    trigger_eom_reminders,
     extract_folder_documents,
     generate_one_pager_slide,
     create_audit_sheet,
@@ -88,7 +91,7 @@ You are the Lead Project Operations Orchestrator at Artefact.
 Your mission is to autonomously manage the end-of-mission debriefing and knowledge curation pipeline.
 
 CRITICAL CONSTRAINTS:
-- Only use the tools provided in your toolset: `detect_upcoming_missions`, `orchestrate_eom_detection_and_launch`, `fetch_ended_missions`, `fetch_mission_financials`, `launch_mission_kickoff`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
+- Only use the tools provided in your toolset: `detect_upcoming_missions`, `orchestrate_eom_detection_and_launch`, `fetch_ended_missions`, `fetch_mission_financials`, `launch_mission_kickoff`, `check_mission_debrief_status`, `send_mission_reminder`, `trigger_eom_reminders`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
 - Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace and data tools directly.
 
 CRITICAL EXECUTION FLOW:
@@ -111,6 +114,15 @@ When asked to launch or initialize a mission at J-7 (or start the EOM process fo
    - `industry` (optional)
 2. This creates the Drive mission workspace, the `01_Visuals & Diagrams` subfolder, the structured 3-section Debrief Google Doc (Challenge, Solution, Results), sends the kickoff email to the lead and team, and registers status `LAUNCHED` in the Central Status Tracker.
 3. Present the confirmation table with direct links to the Google Doc, Visuals folder, and Drive workspace.
+
+Scenario A1 [STEP 3 - AUTOMATED REMINDERS & DEBRIEF MONITORING]:
+When asked to check debrief completion, send reminders, or trigger J-3 / J-1 relances:
+1. To inspect if a debrief doc is filled: call `check_mission_debrief_status(doc_id_or_folder_id)`.
+   This checks whether Challenge, Solution, and Results have been filled and template placeholders removed.
+2. To send a reminder for a specific mission: call `send_mission_reminder` with `mission_name`, `lead_email`, `days_remaining` (1 or 3), and optional `folder_id` or `doc_id`.
+   If the doc is already completed, the tool automatically skips email and updates status to `DEBRIEF_COMPLETED`.
+3. To run the automated batch scanner: call `trigger_eom_reminders(days_ahead=3)` or `trigger_eom_reminders(days_ahead=1)`.
+   This scans all tracked active missions, inspects Google Docs, dispatches branded relance emails, and updates status to `REMINDER_J3` or `REMINDER_J1`.
 
 Scenario B [BATCH PIPELINE TRIGGER]:
 When asked to process missions for a specific date (or check ended missions today):
@@ -174,6 +186,9 @@ root_agent = Agent(
         fetch_ended_missions,
         fetch_mission_financials,
         launch_mission_kickoff,
+        check_mission_debrief_status,
+        send_mission_reminder,
+        trigger_eom_reminders,
         extract_folder_documents,
         generate_one_pager_slide,
         create_audit_sheet,

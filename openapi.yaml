@@ -7,6 +7,65 @@ servers:
   - url: https://eom-workspace-service-6vcfc2gc7q-ew.a.run.app
     description: Cloud Run Production Service
 paths:
+  /launch-mission:
+    post:
+      operationId: launch_mission_kickoff
+      summary: Step 2 - Initializes mission workspace folder, 3-section Debrief Google Doc, and sends kickoff email
+      description: Creates the mission workspace, 01_Visuals & Diagrams subfolder, structured Debrief Doc (Challenge, Solution, Results), dispatches kickoff email, and logs status LAUNCHED in central tracker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - missionName
+                - leadEmail
+              properties:
+                missionName:
+                  type: string
+                  description: Name of the mission
+                leadEmail:
+                  type: string
+                  description: Delivery manager email
+                client:
+                  type: string
+                  description: Client company name
+                teamEmails:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional project team members to CC
+                folderId:
+                  type: string
+                  description: Optional existing mission folder ID
+                parentFolderId:
+                  type: string
+                  description: Optional parent folder ID
+                deadlineDate:
+                  type: string
+                  description: Target debrief deadline date
+      responses:
+        '200':
+          description: Mission kickoff successfully initialized and email sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  missionName:
+                    type: string
+                  folderUrl:
+                    type: string
+                  docUrl:
+                    type: string
+                  visualsFolderUrl:
+                    type: string
+                  emailStatus:
+                    type: string
+
   /extract-documents:
     post:
       operationId: extract_folder_documents

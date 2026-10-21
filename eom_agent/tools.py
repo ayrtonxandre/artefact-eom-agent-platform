@@ -7,6 +7,7 @@ import sys
 from typing import Dict, Any, List, Optional
 
 from .workspace_service import (
+    handle_launch_mission,
     handle_extract_documents,
     handle_generate_slide,
     handle_create_audit_sheet,
@@ -42,6 +43,44 @@ def fetch_mission_financials(mission_name: str) -> Dict[str, Any]:
         A dictionary containing financial KPIs to enrich executive slides.
     """
     return query_mission_financials(mission_name) or {}
+
+def launch_mission_kickoff(
+    mission_name: str,
+    lead_email: str,
+    client: Optional[str] = None,
+    team_emails: Optional[List[str]] = None,
+    folder_id: Optional[str] = None,
+    parent_folder_id: Optional[str] = None,
+    deadline_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Step 2 in Artefact Target EOM Process: Initializes mission workspace and dispatches kickoff email.
+    Creates or locates the mission workspace folder, initializes the structured 3-section Debrief Google Doc
+    (Challenge, Solution, Results), creates the Visuals subfolder, sends the launch email to the mission manager
+    and team, and records status LAUNCHED in the Central Status Tracker.
+    
+    Args:
+        mission_name: Name of the mission (e.g. Clariane, TotalEnergies).
+        lead_email: Email address of the mission delivery manager.
+        client: Client company name.
+        team_emails: List of project team member email addresses (informed / CC).
+        folder_id: Optional existing Google Drive mission folder ID.
+        parent_folder_id: Optional parent container ID in which to create the mission workspace folder.
+        deadline_date: Optional target completion date string (e.g. '28/10/2026'). Defaults to J-7.
+        
+    Returns:
+        A dictionary with status, folderId, folderUrl, docId, docUrl, visualsFolderUrl, and emailStatus.
+    """
+    return handle_launch_mission(
+        mission_name=mission_name,
+        lead_email=lead_email,
+        client=client,
+        team_emails=team_emails,
+        folder_id=folder_id,
+        parent_folder_id=parent_folder_id,
+        deadline_date=deadline_date,
+    )
+
 
 def extract_folder_documents(folder_id: str) -> Dict[str, Any]:
     """

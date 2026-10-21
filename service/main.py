@@ -2,7 +2,7 @@ import os
 import re
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict, Any
 
@@ -14,6 +14,7 @@ import google.auth
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaInMemoryUpload
 
 # =============================================================================
 # AUTHENTICATION HELPER & CONSTANTS
@@ -22,6 +23,7 @@ from googleapiclient.errors import HttpError
 CENTRAL_TRACKER_NAME = "[Artefact EOM] Central Pipeline Status Tracker"
 CENTRAL_TRACKER_TAB = "Pipeline Status Log"
 DEFAULT_TRACKER_ID = "1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s"
+DEFAULT_PARENT_FOLDER_ID = "1oqx6AT98K36xUOM2G_UYKBRGMfv_ub-U"
 TRACKER_HEADERS = [
     "Mission Name",
     "Client",
@@ -299,6 +301,486 @@ def handle_log_pipeline_status(
 # CORE BUSINESS LOGIC HANDLERS
 # =============================================================================
 
+def build_debrief_doc_html(
+    mission_name: str,
+    client: str,
+    lead_email: str,
+    team_emails: List[str],
+    deadline_str: str,
+    visuals_url: str
+) -> str:
+    """Generates corporate Artefact debrief HTML template to be converted into a Google Doc."""
+    team_display = ", ".join(team_emails) if team_emails else "Équipe Projet Artefact"
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{
+    font-family: Arial, Helvetica, sans-serif;
+    color: #1e293b;
+    line-height: 1.6;
+    margin: 20px;
+  }}
+  h1 {{
+    color: #0f172a;
+    font-size: 22pt;
+    font-weight: bold;
+    border-bottom: 2px solid #1a73e8;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }}
+  h2 {{
+    color: #1a73e8;
+    font-size: 15pt;
+    font-weight: bold;
+    margin-top: 26px;
+    margin-bottom: 10px;
+  }}
+  table.meta {{
+    width: 100%;
+    border-collapse: collapse;
+    background-color: #f8fafc;
+    border: 1px solid #cbd5e1;
+    margin-bottom: 20px;
+  }}
+  table.meta td {{
+    padding: 8px 12px;
+    font-size: 11pt;
+    border: 1px solid #cbd5e1;
+  }}
+  table.callout {{
+    width: 100%;
+    border-collapse: collapse;
+    background-color: #eff6ff;
+    border: 1px solid #93c5fd;
+    margin-bottom: 24px;
+  }}
+  table.callout td {{
+    padding: 12px 16px;
+    font-size: 11pt;
+    color: #1e3a8a;
+  }}
+  .guidance {{
+    color: #475569;
+    font-size: 10.5pt;
+    margin-bottom: 8px;
+  }}
+  .placeholder {{
+    color: #94a3b8;
+    font-style: italic;
+    background-color: #ffffff;
+    border: 1px dashed #cbd5e1;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+  }}
+  ul {{
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }}
+  li {{
+    margin-bottom: 4px;
+  }}
+</style>
+</head>
+<body>
+  <h1>Artefact End-of-Mission Debrief</h1>
+
+  <table class="meta">
+    <tr>
+      <td style="width: 25%; font-weight: bold; background-color: #f1f5f9;">Mission</td>
+      <td style="width: 75%;">{mission_name}</td>
+    </tr>
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Client</td>
+      <td>{client}</td>
+    </tr>
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Manager de Mission</td>
+      <td>{lead_email}</td>
+    </tr>
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Équipe Projet</td>
+      <td>{team_display}</td>
+    </tr>
+    <tr>
+      <td style="font-weight: bold; background-color: #f1f5f9;">Date Limite Souhaitée</td>
+      <td style="color: #b91c1c; font-weight: bold;">{deadline_str}</td>
+    </tr>
+  </table>
+
+  <table class="callout">
+    <tr>
+      <td>
+        <strong>🎯 Objectif du Débrief de Mission (Standard One-Pager Artefact) :</strong><br>
+        Ce document constitue le support unique de débrief de fin de mission. Il sera analysé par les agents IA autonomes Artefact pour générer :
+        <ol style="margin-top: 6px; margin-bottom: 6px;">
+          <li>Le <strong>One-Pager exécutif Google Slides</strong> valorisant la mission auprès du leadership et des clients.</li>
+          <li>La <strong>Checklist d'Audit et de Confidentialité Google Sheets</strong> pour sécuriser et indexer les livrables dans la base de connaissances Artefact.</li>
+        </ol>
+        <em>Veuillez renseigner les 3 sections ci-dessous avec des faits précis et des métriques chiffrées.</em>
+      </td>
+    </tr>
+  </table>
+
+  <h2>1. Challenge (Contexte & Problématique Client)</h2>
+  <div class="guidance">
+    <strong>Questions guides :</strong>
+    <ul>
+      <li>Quel était l'enjeu business et stratégique du client ? Quel était le point de douleur initial ?</li>
+      <li>Quelles étaient les contraintes majeures (réglementaires, volumétrie de données, legacy tech, calendrier) ?</li>
+      <li>Pourquoi le client a-t-il fait appel à l'expertise Artefact ?</li>
+    </ul>
+  </div>
+  <div class="placeholder">
+    [Rédigez ici le contexte, les enjeux business du client et les problématiques majeures rencontrées...]
+  </div>
+
+  <h2>2. Solution (Livrables & Architecture Déployée)</h2>
+  <div class="guidance">
+    <strong>Questions guides :</strong>
+    <ul>
+      <li>Quelle solution technique ou fonctionnelle a été conçue et déployée (Data Platform, GenAI, Dashboards, MLOps...) ?</li>
+      <li>Quels sont les livrables concrets produits par Artefact (pipelines BigQuery, modèles Vertex AI, cockpits Looker...) ?</li>
+      <li>Comment s'organisait l'équipe Artefact (rôles, méthodologie agile, accompagnement au changement) ?</li>
+    </ul>
+  </div>
+  <div class="placeholder">
+    [Détaillez ici la solution déployée, les technologies utilisées et les principaux livrables produits...]
+  </div>
+
+  <h2>3. Results & Impact (KPIs & Valeur Métier Générée)</h2>
+  <div class="guidance">
+    <strong>Questions guides :</strong>
+    <ul>
+      <li>Quels sont les impacts chiffrés et mesurables (ex : % de temps gagné, ROI financier, économies en €, volume de requêtes traitées) ?</li>
+      <li>Quelle est l'échelle du déploiement (nombre d'utilisateurs actifs, pays ou entités déployées) ?</li>
+      <li>Quels sont les retours de la part des sponsors clients et les prochaines étapes recommandées (Next Steps) ?</li>
+    </ul>
+  </div>
+  <div class="placeholder">
+    [Indiquez ici les chiffres clés, KPIs d'impact, retours clients et recommandations pour la suite...]
+  </div>
+
+  <h2>4. Visuels & Schémas d'Architecture</h2>
+  <div class="guidance">
+    <strong>Assets attendus :</strong>
+    <ul>
+      <li>Schémas d'architecture technique (Cloud GCP / Data / AI).</li>
+      <li>Captures d'écrans de dashboards, interfaces UI ou démos d'outils.</li>
+      <li>Graphiques de performance ou workflow fonctionnel.</li>
+    </ul>
+    <p>👉 <strong>Déposez directement vos fichiers dans le sous-dossier Drive dédié :</strong><br>
+    <a href="{visuals_url}" style="color: #1a73e8; font-weight: bold;">Accéder au sous-dossier Drive : 01_Visuals & Diagrams &rarr;</a></p>
+  </div>
+</body>
+</html>
+"""
+
+def build_kickoff_email_html(
+    mission_name: str,
+    client: str,
+    lead_email: str,
+    team_emails: List[str],
+    deadline_str: str,
+    doc_url: str,
+    visuals_url: str,
+    folder_url: str,
+    folder_name: str
+) -> str:
+    """Generates corporate Artefact launch / kickoff email in HTML format."""
+    team_greeting = f"Bonjour l'équipe {mission_name}," if team_emails else "Bonjour,"
+    return f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; line-height: 1.6;">
+      <div style="background-color: #0f172a; padding: 24px; border-radius: 8px 8px 0 0; text-align: left;">
+        <span style="background-color: #1e293b; color: #38bdf8; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">Artefact EOM Pipeline</span>
+        <h1 style="color: #ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Lancement du Débrief One-Pager de Fin de Mission</h1>
+        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong></p>
+      </div>
+      
+      <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;">
+        <p style="font-size: 15px; margin-top: 0;">{team_greeting}</p>
+        <p>Votre mission <strong>{mission_name}</strong> approche de son terme (environ 7 jours avant clôture). Afin de valoriser le travail réalisé et de capitaliser sur vos livrables, l'espace de débrief automatisé <strong>Artefact EOM Agent</strong> a été initialisé.</p>
+        
+        <div style="background-color: #f8fafc; border-left: 4px solid #1a73e8; padding: 14px 18px; margin: 20px 0; border-radius: 4px;">
+          <h3 style="margin: 0 0 8px 0; color: #0f172a; font-size: 15px;">📋 2 actions attendues d'ici le <span style="color: #b91c1c;">{deadline_str}</span> :</h3>
+          <ol style="margin: 0; padding-left: 20px; font-size: 14px;">
+            <li style="margin-bottom: 8px;">
+              <strong>Compléter le Google Doc Debrief</strong> structuré en 3 volets clés :
+              <ul style="margin-top: 4px; color: #475569;">
+                <li><strong>1. Challenge :</strong> Contexte client & problématiques résolues</li>
+                <li><strong>2. Solution :</strong> Livrables, stack tech & architecture déployée</li>
+                <li><strong>3. Results :</strong> Métriques chiffrées, ROI & impact métier</li>
+              </ul>
+            </li>
+            <li>
+              <strong>Déposer vos visuels & schémas</strong> d'architecture dans le sous-dossier dédié pour illustrer le deck final.
+            </li>
+          </ol>
+        </div>
+
+        <!-- Call to Action Buttons -->
+        <table style="width: 100%; margin: 25px 0;" cellpadding="0" cellspacing="0">
+          <tr>
+            <td style="padding-right: 8px; width: 50%;">
+              <a href="{doc_url}" target="_blank" style="display: block; text-align: center; background-color: #1a73e8; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
+                📄 Ouvrir le Google Doc Debrief &rarr;
+              </a>
+            </td>
+            <td style="padding-left: 8px; width: 50%;">
+              <a href="{visuals_url}" target="_blank" style="display: block; text-align: center; background-color: #0f172a; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
+                🖼️ Déposer les Visuels & Schémas &rarr;
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <div style="background-color: #f1f5f9; padding: 12px 16px; border-radius: 6px; font-size: 13px; color: #475569;">
+          📁 <strong>Dossier Drive de la Mission :</strong> <a href="{folder_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">{folder_name}</a><br>
+          🤖 <strong>Étape suivante :</strong> Dès vos inputs complétés, le pipeline multi-agent générera le One-Pager exécutif Google Slides et la checklist de conformité interne.
+        </div>
+
+        <p style="font-size: 12px; color: #94a3b8; margin-top: 25px; margin-bottom: 0; text-align: center;">
+          Artefact End-of-Mission Automation • Notification automatique générée par l'agent IA EOM
+        </p>
+      </div>
+    </div>
+    """
+
+def handle_launch_mission(
+    mission_name: str,
+    lead_email: str,
+    client: Optional[str] = None,
+    team_emails: Optional[Any] = None,
+    folder_id: Optional[str] = None,
+    parent_folder_id: Optional[str] = None,
+    deadline_date: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Step 2 in Target EOM Process: Initializes the mission workspace and dispatches kickoff email.
+    1. Locates or creates the mission workspace folder in Google Drive.
+    2. Creates the '01_Visuals & Diagrams' subfolder.
+    3. Creates the structured 3-section Debrief Google Doc template (Challenge, Solution, Results).
+    4. Dispatches the branded kickoff email to the mission manager (lead_email) and team (team_emails).
+    5. Records the milestone 'LAUNCHED' in the Central Pipeline Status Tracker spreadsheet.
+    """
+    creds = get_credentials()
+    drive_svc = get_drive_service(creds)
+    gmail_svc = get_gmail_service(creds)
+
+    clean_mission = mission_name.strip()
+    clean_client = (client or clean_mission.replace("Mission", "").strip()).strip()
+    clean_lead = lead_email.strip()
+
+    # Parse and normalize team emails
+    normalized_team_emails: List[str] = []
+    if isinstance(team_emails, str):
+        try:
+            parsed = json.loads(team_emails)
+            if isinstance(parsed, list):
+                normalized_team_emails = [str(e).strip() for e in parsed if "@" in str(e)]
+            else:
+                normalized_team_emails = [e.strip() for e in team_emails.split(",") if "@" in e]
+        except Exception:
+            normalized_team_emails = [e.strip() for e in team_emails.split(",") if "@" in e]
+    elif isinstance(team_emails, list):
+        normalized_team_emails = [str(e).strip() for e in team_emails if "@" in str(e)]
+
+    # Compute deadline
+    if deadline_date:
+        deadline_str = str(deadline_date).strip()
+    else:
+        deadline_str = (datetime.now() + timedelta(days=7)).strftime("%d/%m/%Y")
+
+    # 1. Resolve or Create Mission Drive Folder
+    mission_folder_id = None
+    mission_folder_url = ""
+    mission_folder_name = ""
+
+    if folder_id:
+        target_fid = parse_folder_id(folder_id)
+        try:
+            meta = drive_svc.files().get(
+                fileId=target_fid,
+                fields="id, name, webViewLink",
+                supportsAllDrives=True
+            ).execute()
+            mission_folder_id = meta["id"]
+            mission_folder_name = meta["name"]
+            mission_folder_url = meta.get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
+        except Exception as e:
+            print(f"[Launch Mission] Warning: could not access specified folder_id {folder_id}: {e}")
+
+    if not mission_folder_id:
+        base_parent = parse_folder_id(parent_folder_id or DEFAULT_PARENT_FOLDER_ID)
+        target_folder_name = f"[EOM] {clean_client} - {clean_mission}" if clean_client not in clean_mission else f"[EOM] {clean_mission}"
+        
+        # Check if already exists in parent
+        try:
+            query = f"'{base_parent}' in parents and name = '{target_folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res = drive_svc.files().list(
+                q=query,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                fields="files(id, name, webViewLink)"
+            ).execute()
+            existing = res.get("files", [])
+            if existing:
+                mission_folder_id = existing[0]["id"]
+                mission_folder_name = existing[0]["name"]
+                mission_folder_url = existing[0].get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
+        except Exception as search_err:
+            print(f"[Launch Mission] Search folder warning: {search_err}")
+
+        # If not existing, create it
+        if not mission_folder_id:
+            body = {
+                "name": target_folder_name,
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": [base_parent]
+            }
+            new_folder = drive_svc.files().create(
+                body=body,
+                supportsAllDrives=True,
+                fields="id, name, webViewLink"
+            ).execute()
+            mission_folder_id = new_folder["id"]
+            mission_folder_name = new_folder["name"]
+            mission_folder_url = new_folder.get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
+
+    # 2. Resolve or Create Visuals Subfolder
+    visuals_name = "01_Visuals & Diagrams"
+    visuals_folder_id = None
+    visuals_folder_url = ""
+    try:
+        q_vis = f"'{mission_folder_id}' in parents and name = '{visuals_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        res_vis = drive_svc.files().list(
+            q=q_vis,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            fields="files(id, name, webViewLink)"
+        ).execute()
+        existing_vis = res_vis.get("files", [])
+        if existing_vis:
+            visuals_folder_id = existing_vis[0]["id"]
+            visuals_folder_url = existing_vis[0].get("webViewLink", f"https://drive.google.com/drive/folders/{visuals_folder_id}")
+        else:
+            new_vis = drive_svc.files().create(
+                body={
+                    "name": visuals_name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [mission_folder_id]
+                },
+                supportsAllDrives=True,
+                fields="id, name, webViewLink"
+            ).execute()
+            visuals_folder_id = new_vis["id"]
+            visuals_folder_url = new_vis.get("webViewLink", f"https://drive.google.com/drive/folders/{visuals_folder_id}")
+    except Exception as vis_err:
+        print(f"[Launch Mission] Visuals subfolder warning: {vis_err}")
+        visuals_folder_url = mission_folder_url
+
+    # 3. Resolve or Create Debrief Template Google Doc
+    doc_title = f"[Debrief Template] {clean_mission} - EOM One-Pager Input"
+    doc_id = None
+    doc_url = ""
+    try:
+        q_doc = f"'{mission_folder_id}' in parents and name = '{doc_title}' and mimeType = 'application/vnd.google-apps.document' and trashed = false"
+        res_doc = drive_svc.files().list(
+            q=q_doc,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            fields="files(id, name, webViewLink)"
+        ).execute()
+        existing_doc = res_doc.get("files", [])
+        if existing_doc:
+            doc_id = existing_doc[0]["id"]
+            doc_url = existing_doc[0].get("webViewLink", f"https://docs.google.com/document/d/{doc_id}/edit")
+        else:
+            doc_html = build_debrief_doc_html(
+                mission_name=clean_mission,
+                client=clean_client,
+                lead_email=clean_lead,
+                team_emails=normalized_team_emails,
+                deadline_str=deadline_str,
+                visuals_url=visuals_folder_url
+            )
+            media = MediaInMemoryUpload(doc_html.encode("utf-8"), mimetype="text/html")
+            new_doc = drive_svc.files().create(
+                body={
+                    "name": doc_title,
+                    "mimeType": "application/vnd.google-apps.document",
+                    "parents": [mission_folder_id]
+                },
+                media_body=media,
+                supportsAllDrives=True,
+                fields="id, name, webViewLink"
+            ).execute()
+            doc_id = new_doc["id"]
+            doc_url = new_doc.get("webViewLink", f"https://docs.google.com/document/d/{doc_id}/edit")
+    except Exception as doc_err:
+        print(f"[Launch Mission] Debrief Doc creation warning: {doc_err}")
+
+    # 4. Dispatch Kickoff Email via Gmail API
+    email_status = "NOT_SENT"
+    try:
+        email_html = build_kickoff_email_html(
+            mission_name=clean_mission,
+            client=clean_client,
+            lead_email=clean_lead,
+            team_emails=normalized_team_emails,
+            deadline_str=deadline_str,
+            doc_url=doc_url,
+            visuals_url=visuals_folder_url,
+            folder_url=mission_folder_url,
+            folder_name=mission_folder_name or clean_mission
+        )
+        msg = MIMEText(email_html, "html")
+        msg["to"] = clean_lead
+        if normalized_team_emails:
+            msg["cc"] = ", ".join(normalized_team_emails)
+        msg["subject"] = f"[Kickoff EOM] Lancement du One-Pager de fin de mission - {clean_mission}"
+        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+        gmail_svc.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
+        email_status = "SENT"
+    except Exception as mail_err:
+        print(f"[Launch Mission] Kickoff email error: {mail_err}")
+        email_status = f"FAILED: {mail_err}"
+
+    # 5. Record Milestone in Central Pipeline Status Tracker (Step 7)
+    tracker_notes = notes or f"Kickoff email sent to {clean_lead}. Debrief Doc and Visuals subfolder ready. Deadline: {deadline_str}"
+    try:
+        handle_log_pipeline_status(
+            mission_name=clean_mission,
+            status="LAUNCHED",
+            client=clean_client,
+            lead_email=clean_lead,
+            folder_url=mission_folder_url,
+            notes=tracker_notes
+        )
+    except Exception as log_err:
+        print(f"[Launch Mission] Status logging warning: {log_err}")
+
+    return {
+        "status": "LAUNCHED",
+        "missionName": clean_mission,
+        "client": clean_client,
+        "leadEmail": clean_lead,
+        "teamEmails": normalized_team_emails,
+        "deadlineDate": deadline_str,
+        "folderId": mission_folder_id,
+        "folderName": mission_folder_name,
+        "folderUrl": mission_folder_url,
+        "docId": doc_id,
+        "docUrl": doc_url,
+        "visualsFolderId": visuals_folder_id,
+        "visualsFolderUrl": visuals_folder_url,
+        "emailStatus": email_status
+    }
+
+
 def handle_extract_documents(folder_raw: str) -> Dict[str, Any]:
     folder_id = parse_folder_id(folder_raw)
     drive_svc = get_drive_service()
@@ -306,7 +788,7 @@ def handle_extract_documents(folder_raw: str) -> Dict[str, Any]:
     # 1. Fetch Folder Metadata
     folder_meta = drive_svc.files().get(
         fileId=folder_id,
-        fields="id, name",
+        fields="id, name, mimeType",
         supportsAllDrives=True
     ).execute()
     mission_name = folder_meta.get("name", "Mission").replace("TEST_", "").strip()
@@ -785,6 +1267,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class LaunchMissionRequest(BaseModel):
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    client: Optional[str] = None
+    teamEmails: Optional[Any] = None
+    team_emails: Optional[Any] = None
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    parentFolderId: Optional[str] = None
+    parent_folder_id: Optional[str] = None
+    deadlineDate: Optional[str] = None
+    deadline_date: Optional[str] = None
+    notes: Optional[str] = None
+
+    def get_mission_name(self) -> str:
+        name = self.missionName or self.mission_name
+        if not name:
+            raise ValueError("missionName or mission_name is required")
+        return name
+
+    def get_lead_email(self) -> str:
+        em = self.leadEmail or self.lead_email
+        if not em:
+            raise ValueError("leadEmail or lead_email is required")
+        return em
+
+    def get_team_emails(self) -> Optional[Any]:
+        return self.teamEmails if self.teamEmails is not None else self.team_emails
+
+    def get_folder_id(self) -> Optional[str]:
+        return self.folderId or self.folder_id
+
+    def get_parent_folder_id(self) -> Optional[str]:
+        return self.parentFolderId or self.parent_folder_id
+
+    def get_deadline_date(self) -> Optional[str]:
+        return self.deadlineDate or self.deadline_date
+
 class ExtractDocumentsRequest(BaseModel):
     folderId: Optional[str] = None
     folder_id: Optional[str] = None
@@ -902,6 +1424,22 @@ class LogPipelineStatusRequest(BaseModel):
 @app.get("/healthz")
 def health_check():
     return {"status": "ok", "service": "Artefact EOM Workspace Tool Service"}
+
+@app.post("/launch-mission", operation_id="launch_mission_kickoff")
+def api_launch_mission(req: LaunchMissionRequest):
+    try:
+        return handle_launch_mission(
+            mission_name=req.get_mission_name(),
+            lead_email=req.get_lead_email(),
+            client=req.client,
+            team_emails=req.get_team_emails(),
+            folder_id=req.get_folder_id(),
+            parent_folder_id=req.get_parent_folder_id(),
+            deadline_date=req.get_deadline_date(),
+            notes=req.notes
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/extract-documents", operation_id="extract_folder_documents")
 def api_extract_documents(req: ExtractDocumentsRequest):

@@ -5,6 +5,7 @@ from google.adk.agents import Agent
 from .tools import (
     fetch_ended_missions,
     fetch_mission_financials,
+    launch_mission_kickoff,
     extract_folder_documents,
     generate_one_pager_slide,
     create_audit_sheet,
@@ -85,18 +86,32 @@ You are the Lead Project Operations Orchestrator at Artefact.
 Your mission is to autonomously manage the end-of-mission debriefing and knowledge curation pipeline.
 
 CRITICAL CONSTRAINTS:
-- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
+- Only use the tools provided in your toolset: `fetch_ended_missions`, `fetch_mission_financials`, `launch_mission_kickoff`, `extract_folder_documents`, `generate_one_pager_slide`, `create_audit_sheet`, `send_lead_notification`, `log_pipeline_status`.
 - Do NOT use GoogleSearch, python interpreter, or any code execution tools. Always invoke the workspace and data tools directly.
 
 CRITICAL EXECUTION FLOW:
 
-Scenario A: When asked to process missions for a specific date (or check ended missions today):
+Scenario A [STEP 2 - MISSION KICKOFF & LAUNCH]:
+When asked to launch or initialize a mission at J-7 (or start the EOM process for a new mission):
+1. Call `launch_mission_kickoff` with:
+   - `mission_name`
+   - `lead_email`
+   - `client` (optional)
+   - `team_emails` (optional list of collaborators to CC)
+   - `folder_id` or `parent_folder_id` (optional)
+   - `deadline_date` (optional, defaults to J-7)
+2. This creates the Drive mission workspace, the `01_Visuals & Diagrams` subfolder, the structured 3-section Debrief Google Doc (Challenge, Solution, Results), sends the kickoff email to the lead and team, and registers status `LAUNCHED` in the Central Status Tracker.
+3. Present the confirmation table with direct links to the Google Doc, Visuals folder, and Drive workspace.
+
+Scenario B [BATCH PIPELINE TRIGGER]:
+When asked to process missions for a specific date (or check ended missions today):
 1. Call `fetch_ended_missions(target_date)` to retrieve all missions ending on that date from BigQuery.
 2. For each mission returned:
-   - Extract the `drive_folder_url` (or ID) and `lead_email`.
-   - Process the mission using Steps 1 through 7 below.
+   - If the mission needs kickoff (J-7): call `launch_mission_kickoff`.
+   - If the mission is completed and documents are ready: process using Steps 1 through 8 below.
 
-Scenario B: When provided with a Google Drive folder URL/ID or mission name directly:
+Scenario C [ONE-PAGER GENERATION & AUDIT]:
+When provided with a Google Drive folder URL/ID or mission name to generate debrief deliverables:
 Step 1 [LOCAL ACTION - DO NOT DELEGATE]:
 Extract the folder ID from the provided URL/string and IMMEDIATELY call `extract_folder_documents` yourself.
 DO NOT call subagents before you have completed this step! You must have the extracted document texts in hand before contacting any subagent.
@@ -141,12 +156,13 @@ Present a clean markdown summary table to the user with direct links to:
 root_agent = Agent(
     name="Artefact_EOM_Mission_Orchestrator",
     model="gemini-2.5-flash",
-    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Retrieves completed missions and financials from BigQuery, extracts project documentation from Google Drive, orchestrates executive synthesis into client-ready Google Slides, audits confidentiality risks in Google Sheets, maintains central pipeline status log, and dispatches lead notifications.",
+    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Manages J-7 mission launch emails, debrief templates, BigQuery financials, executive synthesis into client-ready Google Slides, confidentiality risk audits in Google Sheets, central pipeline tracking, and lead notifications.",
     instruction=ORCHESTRATOR_INSTRUCTIONS,
     sub_agents=[executive_synthesizer, security_auditor],
     tools=[
         fetch_ended_missions,
         fetch_mission_financials,
+        launch_mission_kickoff,
         extract_folder_documents,
         generate_one_pager_slide,
         create_audit_sheet,

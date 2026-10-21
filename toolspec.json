@@ -1,6 +1,53 @@
 {
   "tools": [
     {
+      "name": "launch_mission_kickoff",
+      "description": "Initializes mission workspace folder, 3-section Debrief Google Doc (Challenge, Solution, Results), Visuals subfolder, dispatches kickoff email to lead and team, and registers status LAUNCHED in tracker.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission (e.g. Clariane, TotalEnergies)"
+          },
+          "leadEmail": {
+            "type": "string",
+            "description": "Email address of the mission delivery lead"
+          },
+          "client": {
+            "type": "string",
+            "description": "Client company name"
+          },
+          "teamEmails": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of project team member emails to notify (CC)"
+          },
+          "folderId": {
+            "type": "string",
+            "description": "Optional existing Google Drive mission folder ID"
+          },
+          "parentFolderId": {
+            "type": "string",
+            "description": "Optional Google Drive parent folder ID"
+          },
+          "deadlineDate": {
+            "type": "string",
+            "description": "Optional target completion date string"
+          }
+        },
+        "required": [
+          "missionName",
+          "leadEmail"
+        ]
+      },
+      "annotations": {
+        "title": "Launch Mission Kickoff",
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
       "name": "extract_folder_documents",
       "description": "Extracts document contents, file metadata, and mission context from a Google Drive mission folder.",
       "inputSchema": {
@@ -117,6 +164,60 @@
         "title": "Send Lead Notification",
         "destructiveHint": false,
         "idempotentHint": false
+      }
+    },
+    {
+      "name": "log_pipeline_status",
+      "description": "Upserts the project lifecycle status and artifact links into the Central Pipeline Status Tracker spreadsheet.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "missionName": {
+            "type": "string",
+            "description": "Name of the mission"
+          },
+          "status": {
+            "type": "string",
+            "description": "Pipeline milestone status (e.g. LAUNCHED, DOCS_EXTRACTED, DECK_GENERATED, AUDIT_READY, NOTIFIED_LEAD)"
+          },
+          "client": {
+            "type": "string",
+            "description": "Client company name"
+          },
+          "leadEmail": {
+            "type": "string",
+            "description": "Mission lead email"
+          },
+          "deckUrl": {
+            "type": "string",
+            "description": "Google Slides URL"
+          },
+          "auditUrl": {
+            "type": "string",
+            "description": "Google Sheets audit checklist URL"
+          },
+          "folderUrl": {
+            "type": "string",
+            "description": "Google Drive folder URL"
+          },
+          "risk": {
+            "type": "string",
+            "description": "Highest detected confidentiality risk (LOW, MEDIUM, HIGH, CRITICAL)"
+          },
+          "notes": {
+            "type": "string",
+            "description": "Log notes or execution details"
+          }
+        },
+        "required": [
+          "missionName",
+          "status"
+        ]
+      },
+      "annotations": {
+        "title": "Log Pipeline Status",
+        "destructiveHint": false,
+        "idempotentHint": true
       }
     }
   ]

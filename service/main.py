@@ -1,28 +1,77 @@
 import os
 import sys
 import re
+import io
 import json
 import base64
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Query
+# Prevent deprecated oauth2client crash on mismatched OpenSSL in Anaconda/system Python
+if "oauth2client" not in sys.modules:
+    sys.modules["oauth2client"] = None
+
+try:
+    import certifi
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+    os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+    import httplib2
+    httplib2.CA_CERTS = certifi.where()
+    import ssl
+    ssl._create_default_https_context = lambda *args, **kwargs: ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    pass
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Add workspace root to sys.path
+# Add workspace root and local dir to sys.path
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from eom_agent.bigquery_service import (
     query_upcoming_missions,
-    detect_and_launch_upcoming_missions
+    detect_and_launch_upcoming_missions,
+    MOCK_MISSIONS
 )
 from eom_agent.workspace_service import (
+    CENTRAL_TRACKER_NAME,
+    CENTRAL_TRACKER_TAB,
+    DEFAULT_TRACKER_ID,
+    DEFAULT_PARENT_FOLDER_ID,
+    TRACKER_HEADERS,
+    SCOPES,
+    DISPATCH_SECURITY_EXEMPT_MISSIONS,
+    is_dispatch_security_exempt,
+    get_credentials,
+    get_drive_service,
+    get_docs_service,
+    get_slides_service,
+    get_sheets_service,
+    get_gmail_service,
+    parse_folder_id,
+    format_card_text,
+    get_or_create_central_tracker_sheet,
+    handle_log_pipeline_status,
+    build_debrief_doc_html,
+    build_kickoff_email_html,
+    build_antichamber_email_html,
+    handle_send_antichamber_notification,
+    handle_launch_mission,
     check_debrief_doc_completion,
     build_reminder_email_html,
     handle_send_reminder,
-    scan_and_send_reminders
+    scan_and_send_reminders,
+    handle_extract_documents,
+    handle_generate_slide,
+    handle_create_audit_sheet,
+    build_completed_email_html,
+    handle_send_notification,
+    handle_prefill_debrief_doc,
+    handle_wrapup_mission,
 )
 
 import google.auth
@@ -30,1252 +79,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
-
-# =============================================================================
-# AUTHENTICATION HELPER & CONSTANTS
-# =============================================================================
-
-CENTRAL_TRACKER_NAME = "[Artefact EOM] Central Pipeline Status Tracker"
-CENTRAL_TRACKER_TAB = "Pipeline Status Log"
-DEFAULT_TRACKER_ID = "1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s"
-DEFAULT_PARENT_FOLDER_ID = "1oqx6AT98K36xUOM2G_UYKBRGMfv_ub-U"
-TRACKER_HEADERS = [
-    "Mission Name",
-    "Client",
-    "Lead Email",
-    "Status",
-    "One-Pager Deck",
-    "Audit Sheet",
-    "Drive Folder",
-    "Confidentiality Risk",
-    "Last Updated",
-    "Notes"
-]
-
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/presentations",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/gmail.send"
-]
-
-def get_credentials():
-    """
-    Resolves Google Credentials:
-    1. Checks DRIVE_TOKEN_JSON environment variable (base64 or raw JSON string).
-    2. Checks DRIVE_TOKEN_PATH or local drive_token.json files.
-    3. Falls back to Application Default Credentials (ADC) for Cloud Run / Cloud Functions.
-    """
-    # 1. Check raw or base64 JSON in environment variable
-    raw_token = os.environ.get("DRIVE_TOKEN_JSON")
-    if raw_token:
-        try:
-            raw_str = raw_token.strip()
-            if raw_str.startswith("{"):
-                info = json.loads(raw_str)
-            else:
-                info = json.loads(base64.b64decode(raw_str).decode("utf-8"))
-            return Credentials.from_authorized_user_info(info, SCOPES)
-        except Exception as e:
-            print(f"[Auth] Could not load from DRIVE_TOKEN_JSON: {e}")
-
-    # 2. Check local file paths
-    token_candidates = [
-        os.environ.get("DRIVE_TOKEN_PATH"),
-        os.path.join(os.path.dirname(__file__), "drive_token.json"),
-        os.path.join(os.path.dirname(__file__), "..", "drive_token.json"),
-        "/Users/ayrtonandre/eom_agent_platform/drive_token.json",
-        os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
-    ]
-
-    for cand in token_candidates:
-        if cand and os.path.exists(cand):
-            try:
-                return Credentials.from_authorized_user_file(cand, SCOPES)
-            except Exception as e:
-                print(f"[Auth] Could not load authorized user file from {cand}: {e}")
-
-    # 3. Fallback to Google Application Default Credentials (ADC)
-    creds, _ = google.auth.default(scopes=SCOPES)
-    return creds
-
-def get_drive_service(creds=None):
-    return build("drive", "v3", credentials=creds or get_credentials())
-
-def get_slides_service(creds=None):
-    return build("slides", "v1", credentials=creds or get_credentials())
-
-def get_sheets_service(creds=None):
-    return build("sheets", "v4", credentials=creds or get_credentials())
-
-def get_gmail_service(creds=None):
-    return build("gmail", "v1", credentials=creds or get_credentials())
-
-def parse_folder_id(raw_id_or_url: str) -> str:
-    """Extracts 28-33 char Google Drive folder ID from full URL or returns raw ID."""
-    match = re.search(r"folders/([a-zA-Z0-9_-]+)", str(raw_id_or_url))
-    if match:
-        return match.group(1)
-    return str(raw_id_or_url).strip()
-
-def format_card_text(val: Any) -> str:
-    """Converts arrays, dicts, or strings into clean, formatted text bullets."""
-    if not val:
-        return "N/A"
-    if isinstance(val, list):
-        return "\n".join([f"• {str(item).strip()}" for item in val])
-    if isinstance(val, dict):
-        return "\n".join([f"• {k}: {v}" for k, v in val.items()])
-    return str(val).strip()
-
-def get_or_create_central_tracker_sheet(creds=None) -> str:
-    """
-    Returns the spreadsheet ID of the Central Pipeline Status Tracker.
-    If the spreadsheet does not exist yet, creates and formats it automatically.
-    """
-    env_id = os.environ.get("CENTRAL_TRACKER_ID")
-    if env_id:
-        return env_id
-    if DEFAULT_TRACKER_ID:
-        return DEFAULT_TRACKER_ID
-
-    drive_svc = get_drive_service(creds)
-    sheets_svc = get_sheets_service(creds)
-
-    res = drive_svc.files().list(
-        q=f"name = '{CENTRAL_TRACKER_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        fields="files(id, name)"
-    ).execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-
-    # Create new central tracker spreadsheet
-    ss_body = {
-        "properties": {"title": CENTRAL_TRACKER_NAME},
-        "sheets": [{
-            "properties": {
-                "sheetId": 0,
-                "title": CENTRAL_TRACKER_TAB,
-                "gridProperties": {"frozenRowCount": 1}
-            }
-        }]
-    }
-    ss = sheets_svc.spreadsheets().create(body=ss_body, fields="spreadsheetId").execute()
-    new_id = ss["spreadsheetId"]
-
-    # Write Header row
-    sheets_svc.spreadsheets().values().update(
-        spreadsheetId=new_id,
-        range=f"'{CENTRAL_TRACKER_TAB}'!A1:J1",
-        valueInputOption="USER_ENTERED",
-        body={"values": [TRACKER_HEADERS]}
-    ).execute()
-
-    # Apply corporate formatting (Artefact Dark Navy #0F172A)
-    format_reqs = [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": 0,
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": len(TRACKER_HEADERS)
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.06, "green": 0.09, "blue": 0.16},
-                        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "fontSize": 10}
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"
-            }
-        },
-        {
-            "autoResizeDimensions": {
-                "dimensions": {
-                    "sheetId": 0,
-                    "dimension": "COLUMNS",
-                    "startIndex": 0,
-                    "endIndex": len(TRACKER_HEADERS)
-                }
-            }
-        }
-    ]
-    sheets_svc.spreadsheets().batchUpdate(
-        spreadsheetId=new_id,
-        body={"requests": format_reqs}
-    ).execute()
-
-    return new_id
-
-
-def handle_log_pipeline_status(
-    mission_name: str,
-    status: str,
-    client: Optional[str] = None,
-    lead_email: Optional[str] = None,
-    deck_url: Optional[str] = None,
-    audit_url: Optional[str] = None,
-    folder_url: Optional[str] = None,
-    risk: Optional[str] = None,
-    notes: Optional[str] = None,
-    tracker_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Step 7 in Artefact Target EOM Process: Maintains the central status log.
-    Upserts the pipeline milestone into the Central Pipeline Status Tracker spreadsheet.
-    Prevents duplicate rows by updating existing mission entries in place.
-    """
-    creds = get_credentials()
-    sheets_svc = get_sheets_service(creds)
-    target_tracker_id = tracker_id or get_or_create_central_tracker_sheet(creds)
-    tab_name = CENTRAL_TRACKER_TAB
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # Read existing rows
-    try:
-        res = sheets_svc.spreadsheets().values().get(
-            spreadsheetId=target_tracker_id,
-            range=f"'{tab_name}'!A:J"
-        ).execute()
-        rows = res.get("values", [])
-    except Exception as e:
-        print(f"[Tracker] Error reading tracker spreadsheet {target_tracker_id}: {e}")
-        rows = []
-
-    target_row_idx = None
-    existing_row = []
-    clean_mission = mission_name.strip().lower()
-
-    for idx, r in enumerate(rows):
-        if r and r[0].strip().lower() == clean_mission:
-            target_row_idx = idx + 1  # 1-indexed for Sheets API
-            existing_row = r
-            break
-
-    def get_existing(col_idx: int) -> str:
-        if existing_row and len(existing_row) > col_idx:
-            return existing_row[col_idx]
-        return ""
-
-    # Merge updated fields with existing fields (preserves non-empty data across stages)
-    row_values = [
-        mission_name,
-        client or get_existing(1),
-        lead_email or get_existing(2),
-        status or get_existing(3),
-        deck_url or get_existing(4),
-        audit_url or get_existing(5),
-        folder_url or get_existing(6),
-        risk or get_existing(7),
-        now_str,
-        notes if notes is not None else get_existing(9)
-    ]
-
-    try:
-        if target_row_idx:
-            sheets_svc.spreadsheets().values().update(
-                spreadsheetId=target_tracker_id,
-                range=f"'{tab_name}'!A{target_row_idx}:J{target_row_idx}",
-                valueInputOption="USER_ENTERED",
-                body={"values": [row_values]}
-            ).execute()
-            action = f"UPDATED row {target_row_idx}"
-        else:
-            sheets_svc.spreadsheets().values().append(
-                spreadsheetId=target_tracker_id,
-                range=f"'{tab_name}'!A:J",
-                valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row_values]}
-            ).execute()
-            action = "APPENDED new row"
-
-        return {
-            "status": "SUCCESS",
-            "action": action,
-            "missionName": mission_name,
-            "pipelineStatus": status,
-            "trackerId": target_tracker_id,
-            "updatedAt": now_str
-        }
-    except Exception as e:
-        print(f"[Tracker] Failed to update central status tracker: {e}")
-        return {
-            "status": "FAILED",
-            "error": str(e),
-            "missionName": mission_name,
-            "pipelineStatus": status
-        }
-
-# =============================================================================
-# CORE BUSINESS LOGIC HANDLERS
-# =============================================================================
-
-def build_debrief_doc_html(
-    mission_name: str,
-    client: str,
-    lead_email: str,
-    team_emails: List[str],
-    deadline_str: str,
-    visuals_url: str,
-    industry: Optional[str] = None
-) -> str:
-    """Generates corporate Artefact debrief HTML template to be converted into a Google Doc."""
-    team_display = ", ".join(team_emails) if team_emails else "Équipe Projet Artefact"
-    industry_row = f"""
-    <tr>
-      <td style="font-weight: bold; background-color: #f1f5f9;">Secteur / Industrie</td>
-      <td>{industry}</td>
-    </tr>""" if industry else ""
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body {{
-    font-family: Arial, Helvetica, sans-serif;
-    color: #1e293b;
-    line-height: 1.6;
-    margin: 20px;
-  }}
-  h1 {{
-    color: #0f172a;
-    font-size: 22pt;
-    font-weight: bold;
-    border-bottom: 2px solid #1a73e8;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-  }}
-  h2 {{
-    color: #1a73e8;
-    font-size: 15pt;
-    font-weight: bold;
-    margin-top: 26px;
-    margin-bottom: 10px;
-  }}
-  table.meta {{
-    width: 100%;
-    border-collapse: collapse;
-    background-color: #f8fafc;
-    border: 1px solid #cbd5e1;
-    margin-bottom: 20px;
-  }}
-  table.meta td {{
-    padding: 8px 12px;
-    font-size: 11pt;
-    border: 1px solid #cbd5e1;
-  }}
-  table.callout {{
-    width: 100%;
-    border-collapse: collapse;
-    background-color: #eff6ff;
-    border: 1px solid #93c5fd;
-    margin-bottom: 24px;
-  }}
-  table.callout td {{
-    padding: 12px 16px;
-    font-size: 11pt;
-    color: #1e3a8a;
-  }}
-  .guidance {{
-    color: #475569;
-    font-size: 10.5pt;
-    margin-bottom: 8px;
-  }}
-  .placeholder {{
-    color: #94a3b8;
-    font-style: italic;
-    background-color: #ffffff;
-    border: 1px dashed #cbd5e1;
-    padding: 14px 18px;
-    margin-bottom: 20px;
-  }}
-  ul {{
-    margin-top: 4px;
-    margin-bottom: 8px;
-  }}
-  li {{
-    margin-bottom: 4px;
-  }}
-</style>
-</head>
-<body>
-  <h1>Artefact End-of-Mission Debrief</h1>
-
-  <table class="meta">
-    <tr>
-      <td style="width: 25%; font-weight: bold; background-color: #f1f5f9;">Mission</td>
-      <td style="width: 75%;">{mission_name}</td>
-    </tr>
-    <tr>
-      <td style="font-weight: bold; background-color: #f1f5f9;">Client</td>
-      <td>{client}</td>
-    </tr>{industry_row}
-    <tr>
-      <td style="font-weight: bold; background-color: #f1f5f9;">Manager de Mission</td>
-      <td>{lead_email}</td>
-    </tr>
-    <tr>
-      <td style="font-weight: bold; background-color: #f1f5f9;">Équipe Projet</td>
-      <td>{team_display}</td>
-    </tr>
-    <tr>
-      <td style="font-weight: bold; background-color: #f1f5f9;">Date Limite Souhaitée</td>
-      <td style="color: #b91c1c; font-weight: bold;">{deadline_str}</td>
-    </tr>
-  </table>
-
-  <table class="callout">
-    <tr>
-      <td>
-        <strong>🎯 Objectif du Débrief de Mission (Standard One-Pager Artefact) :</strong><br>
-        Ce document constitue le support unique de débrief de fin de mission. Il sera analysé par les agents IA autonomes Artefact pour générer :
-        <ol style="margin-top: 6px; margin-bottom: 6px;">
-          <li>Le <strong>One-Pager exécutif Google Slides</strong> valorisant la mission auprès du leadership et des clients.</li>
-          <li>La <strong>Checklist d'Audit et de Confidentialité Google Sheets</strong> pour sécuriser et indexer les livrables dans la base de connaissances Artefact.</li>
-        </ol>
-        <em>Veuillez renseigner les 3 sections ci-dessous avec des faits précis et des métriques chiffrées.</em>
-      </td>
-    </tr>
-  </table>
-
-  <h2>1. Challenge (Contexte & Problématique Client)</h2>
-  <div class="guidance">
-    <strong>Questions guides :</strong>
-    <ul>
-      <li>Quel était l'enjeu business et stratégique du client ? Quel était le point de douleur initial ?</li>
-      <li>Quelles étaient les contraintes majeures (réglementaires, volumétrie de données, legacy tech, calendrier) ?</li>
-      <li>Pourquoi le client a-t-il fait appel à l'expertise Artefact ?</li>
-    </ul>
-  </div>
-  <div class="placeholder">
-    [Rédigez ici le contexte, les enjeux business du client et les problématiques majeures rencontrées...]
-  </div>
-
-  <h2>2. Solution (Livrables & Architecture Déployée)</h2>
-  <div class="guidance">
-    <strong>Questions guides :</strong>
-    <ul>
-      <li>Quelle solution technique ou fonctionnelle a été conçue et déployée (Data Platform, GenAI, Dashboards, MLOps...) ?</li>
-      <li>Quels sont les livrables concrets produits par Artefact (pipelines BigQuery, modèles Vertex AI, cockpits Looker...) ?</li>
-      <li>Comment s'organisait l'équipe Artefact (rôles, méthodologie agile, accompagnement au changement) ?</li>
-    </ul>
-  </div>
-  <div class="placeholder">
-    [Détaillez ici la solution déployée, les technologies utilisées et les principaux livrables produits...]
-  </div>
-
-  <h2>3. Results & Impact (KPIs & Valeur Métier Générée)</h2>
-  <div class="guidance">
-    <strong>Questions guides :</strong>
-    <ul>
-      <li>Quels sont les impacts chiffrés et mesurables (ex : % de temps gagné, ROI financier, économies en €, volume de requêtes traitées) ?</li>
-      <li>Quelle est l'échelle du déploiement (nombre d'utilisateurs actifs, pays ou entités déployées) ?</li>
-      <li>Quels sont les retours de la part des sponsors clients et les prochaines étapes recommandées (Next Steps) ?</li>
-    </ul>
-  </div>
-  <div class="placeholder">
-    [Indiquez ici les chiffres clés, KPIs d'impact, retours clients et recommandations pour la suite...]
-  </div>
-
-  <h2>4. Visuels & Schémas d'Architecture</h2>
-  <div class="guidance">
-    <strong>Assets attendus :</strong>
-    <ul>
-      <li>Schémas d'architecture technique (Cloud GCP / Data / AI).</li>
-      <li>Captures d'écrans de dashboards, interfaces UI ou démos d'outils.</li>
-      <li>Graphiques de performance ou workflow fonctionnel.</li>
-    </ul>
-    <p>👉 <strong>Déposez directement vos fichiers dans le sous-dossier Drive dédié :</strong><br>
-    <a href="{visuals_url}" style="color: #1a73e8; font-weight: bold;">Accéder au sous-dossier Drive : 01_Visuals & Diagrams &rarr;</a></p>
-  </div>
-</body>
-</html>
-"""
-
-def build_kickoff_email_html(
-    mission_name: str,
-    client: str,
-    lead_email: str,
-    team_emails: List[str],
-    deadline_str: str,
-    doc_url: str,
-    visuals_url: str,
-    folder_url: str,
-    folder_name: str,
-    industry: Optional[str] = None
-) -> str:
-    """Generates corporate Artefact launch / kickoff email in HTML format."""
-    team_greeting = f"Bonjour l'équipe {mission_name}," if team_emails else "Bonjour,"
-    sub_info = f"Mission : <strong>{mission_name}</strong> | Client : <strong>{client}</strong>"
-    if industry:
-        sub_info += f" | Secteur : <strong>{industry}</strong>"
-    return f"""
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; color: #1e293b; line-height: 1.6;">
-      <div style="background-color: #0f172a; padding: 24px; border-radius: 8px 8px 0 0; text-align: left;">
-        <span style="background-color: #1e293b; color: #38bdf8; font-size: 11px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">Artefact EOM Pipeline</span>
-        <h1 style="color: #ffffff; margin: 10px 0 0 0; font-size: 20px; font-weight: 600;">Lancement du Débrief One-Pager de Fin de Mission</h1>
-        <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">{sub_info}</p>
-      </div>
-      
-      <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background-color: #ffffff;">
-        <p style="font-size: 15px; margin-top: 0;">{team_greeting}</p>
-        <p>Votre mission <strong>{mission_name}</strong> approche de son terme (environ 7 jours avant clôture). Afin de valoriser le travail réalisé et de capitaliser sur vos livrables, l'espace de débrief automatisé <strong>Artefact EOM Agent</strong> a été initialisé.</p>
-        
-        <div style="background-color: #f8fafc; border-left: 4px solid #1a73e8; padding: 14px 18px; margin: 20px 0; border-radius: 4px;">
-          <h3 style="margin: 0 0 8px 0; color: #0f172a; font-size: 15px;">📋 2 actions attendues d'ici le <span style="color: #b91c1c;">{deadline_str}</span> :</h3>
-          <ol style="margin: 0; padding-left: 20px; font-size: 14px;">
-            <li style="margin-bottom: 8px;">
-              <strong>Compléter le Google Doc Debrief</strong> structuré en 3 volets clés :
-              <ul style="margin-top: 4px; color: #475569;">
-                <li><strong>1. Challenge :</strong> Contexte client & problématiques résolues</li>
-                <li><strong>2. Solution :</strong> Livrables, stack tech & architecture déployée</li>
-                <li><strong>3. Results :</strong> Métriques chiffrées, ROI & impact métier</li>
-              </ul>
-            </li>
-            <li>
-              <strong>Déposer vos visuels & schémas</strong> d'architecture dans le sous-dossier dédié pour illustrer le deck final.
-            </li>
-          </ol>
-        </div>
-
-        <!-- Call to Action Buttons -->
-        <table style="width: 100%; margin: 25px 0;" cellpadding="0" cellspacing="0">
-          <tr>
-            <td style="padding-right: 8px; width: 50%;">
-              <a href="{doc_url}" target="_blank" style="display: block; text-align: center; background-color: #1a73e8; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
-                📄 Ouvrir le Google Doc Debrief &rarr;
-              </a>
-            </td>
-            <td style="padding-left: 8px; width: 50%;">
-              <a href="{visuals_url}" target="_blank" style="display: block; text-align: center; background-color: #0f172a; color: #ffffff; padding: 12px 14px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 13px;">
-                🖼️ Déposer les Visuels & Schémas &rarr;
-              </a>
-            </td>
-          </tr>
-        </table>
-
-        <div style="background-color: #f1f5f9; padding: 12px 16px; border-radius: 6px; font-size: 13px; color: #475569;">
-          📁 <strong>Dossier Drive de la Mission :</strong> <a href="{folder_url}" target="_blank" style="color: #1a73e8; text-decoration: underline;">{folder_name}</a><br>
-          🤖 <strong>Étape suivante :</strong> Dès vos inputs complétés, le pipeline multi-agent générera le One-Pager exécutif Google Slides et la checklist de conformité interne.
-        </div>
-
-        <p style="font-size: 12px; color: #94a3b8; margin-top: 25px; margin-bottom: 0; text-align: center;">
-          Artefact End-of-Mission Automation • Notification automatique générée par l'agent IA EOM
-        </p>
-      </div>
-    </div>
-    """
-
-def handle_launch_mission(
-    mission_name: str,
-    lead_email: str,
-    client: Optional[str] = None,
-    team_emails: Optional[Any] = None,
-    folder_id: Optional[str] = None,
-    parent_folder_id: Optional[str] = None,
-    deadline_date: Optional[str] = None,
-    notes: Optional[str] = None,
-    industry: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Step 2 in Target EOM Process: Initializes the mission workspace and dispatches kickoff email.
-    1. Locates or creates the mission workspace folder in Google Drive.
-    2. Creates the '01_Visuals & Diagrams' subfolder.
-    3. Creates the structured 3-section Debrief Google Doc template (Challenge, Solution, Results).
-    4. Dispatches the branded kickoff email to the mission manager (lead_email) and team (team_emails).
-    5. Records the milestone 'LAUNCHED' in the Central Pipeline Status Tracker spreadsheet.
-    """
-    creds = get_credentials()
-    drive_svc = get_drive_service(creds)
-    gmail_svc = get_gmail_service(creds)
-
-    clean_mission = mission_name.strip()
-    clean_client = (client or clean_mission.replace("Mission", "").strip()).strip()
-    clean_lead = lead_email.strip()
-
-    # Parse and normalize team emails
-    normalized_team_emails: List[str] = []
-    if isinstance(team_emails, str):
-        try:
-            parsed = json.loads(team_emails)
-            if isinstance(parsed, list):
-                normalized_team_emails = [str(e).strip() for e in parsed if "@" in str(e)]
-            else:
-                normalized_team_emails = [e.strip() for e in team_emails.split(",") if "@" in e]
-        except Exception:
-            normalized_team_emails = [e.strip() for e in team_emails.split(",") if "@" in e]
-    elif isinstance(team_emails, list):
-        normalized_team_emails = [str(e).strip() for e in team_emails if "@" in str(e)]
-
-    # Compute deadline
-    if deadline_date:
-        deadline_str = str(deadline_date).strip()
-    else:
-        deadline_str = (datetime.now() + timedelta(days=7)).strftime("%d/%m/%Y")
-
-    # 1. Resolve or Create Mission Drive Folder
-    mission_folder_id = None
-    mission_folder_url = ""
-    mission_folder_name = ""
-
-    if folder_id:
-        target_fid = parse_folder_id(folder_id)
-        try:
-            meta = drive_svc.files().get(
-                fileId=target_fid,
-                fields="id, name, webViewLink",
-                supportsAllDrives=True
-            ).execute()
-            mission_folder_id = meta["id"]
-            mission_folder_name = meta["name"]
-            mission_folder_url = meta.get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
-        except Exception as e:
-            print(f"[Launch Mission] Warning: could not access specified folder_id {folder_id}: {e}")
-
-    if not mission_folder_id:
-        base_parent = parse_folder_id(parent_folder_id or DEFAULT_PARENT_FOLDER_ID)
-        target_folder_name = f"[EOM] {clean_client} - {clean_mission}" if clean_client not in clean_mission else f"[EOM] {clean_mission}"
-        
-        # Check if already exists in parent
-        try:
-            query = f"'{base_parent}' in parents and name = '{target_folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-            res = drive_svc.files().list(
-                q=query,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-                fields="files(id, name, webViewLink)"
-            ).execute()
-            existing = res.get("files", [])
-            if existing:
-                mission_folder_id = existing[0]["id"]
-                mission_folder_name = existing[0]["name"]
-                mission_folder_url = existing[0].get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
-        except Exception as search_err:
-            print(f"[Launch Mission] Search folder warning: {search_err}")
-
-        # If not existing, create it
-        if not mission_folder_id:
-            body = {
-                "name": target_folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [base_parent]
-            }
-            new_folder = drive_svc.files().create(
-                body=body,
-                supportsAllDrives=True,
-                fields="id, name, webViewLink"
-            ).execute()
-            mission_folder_id = new_folder["id"]
-            mission_folder_name = new_folder["name"]
-            mission_folder_url = new_folder.get("webViewLink", f"https://drive.google.com/drive/folders/{mission_folder_id}")
-
-    # 2. Resolve or Create Visuals Subfolder
-    visuals_name = "01_Visuals & Diagrams"
-    visuals_folder_id = None
-    visuals_folder_url = ""
-    try:
-        q_vis = f"'{mission_folder_id}' in parents and name = '{visuals_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        res_vis = drive_svc.files().list(
-            q=q_vis,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name, webViewLink)"
-        ).execute()
-        existing_vis = res_vis.get("files", [])
-        if existing_vis:
-            visuals_folder_id = existing_vis[0]["id"]
-            visuals_folder_url = existing_vis[0].get("webViewLink", f"https://drive.google.com/drive/folders/{visuals_folder_id}")
-        else:
-            new_vis = drive_svc.files().create(
-                body={
-                    "name": visuals_name,
-                    "mimeType": "application/vnd.google-apps.folder",
-                    "parents": [mission_folder_id]
-                },
-                supportsAllDrives=True,
-                fields="id, name, webViewLink"
-            ).execute()
-            visuals_folder_id = new_vis["id"]
-            visuals_folder_url = new_vis.get("webViewLink", f"https://drive.google.com/drive/folders/{visuals_folder_id}")
-    except Exception as vis_err:
-        print(f"[Launch Mission] Visuals subfolder warning: {vis_err}")
-        visuals_folder_url = mission_folder_url
-
-    # 3. Resolve or Create Debrief Template Google Doc
-    doc_title = f"[Debrief Template] {clean_mission} - EOM One-Pager Input"
-    doc_id = None
-    doc_url = ""
-    try:
-        q_doc = f"'{mission_folder_id}' in parents and name = '{doc_title}' and mimeType = 'application/vnd.google-apps.document' and trashed = false"
-        res_doc = drive_svc.files().list(
-            q=q_doc,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name, webViewLink)"
-        ).execute()
-        existing_doc = res_doc.get("files", [])
-        if existing_doc:
-            doc_id = existing_doc[0]["id"]
-            doc_url = existing_doc[0].get("webViewLink", f"https://docs.google.com/document/d/{doc_id}/edit")
-        else:
-            doc_html = build_debrief_doc_html(
-                mission_name=clean_mission,
-                client=clean_client,
-                lead_email=clean_lead,
-                team_emails=normalized_team_emails,
-                deadline_str=deadline_str,
-                visuals_url=visuals_folder_url,
-                industry=industry
-            )
-            media = MediaInMemoryUpload(doc_html.encode("utf-8"), mimetype="text/html")
-            new_doc = drive_svc.files().create(
-                body={
-                    "name": doc_title,
-                    "mimeType": "application/vnd.google-apps.document",
-                    "parents": [mission_folder_id]
-                },
-                media_body=media,
-                supportsAllDrives=True,
-                fields="id, name, webViewLink"
-            ).execute()
-            doc_id = new_doc["id"]
-            doc_url = new_doc.get("webViewLink", f"https://docs.google.com/document/d/{doc_id}/edit")
-    except Exception as doc_err:
-        print(f"[Launch Mission] Debrief Doc creation warning: {doc_err}")
-
-    # 4. Dispatch Kickoff Email via Gmail API
-    email_status = "NOT_SENT"
-    try:
-        email_html = build_kickoff_email_html(
-            mission_name=clean_mission,
-            client=clean_client,
-            lead_email=clean_lead,
-            team_emails=normalized_team_emails,
-            deadline_str=deadline_str,
-            doc_url=doc_url,
-            visuals_url=visuals_folder_url,
-            folder_url=mission_folder_url,
-            folder_name=mission_folder_name or clean_mission,
-            industry=industry
-        )
-        msg = MIMEText(email_html, "html")
-        msg["to"] = clean_lead
-        if normalized_team_emails:
-            msg["cc"] = ", ".join(normalized_team_emails)
-        msg["subject"] = f"[Kickoff EOM] Lancement du One-Pager de fin de mission - {clean_mission}"
-        raw_msg = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-        gmail_svc.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        email_status = "SENT"
-    except Exception as mail_err:
-        print(f"[Launch Mission] Kickoff email error: {mail_err}")
-        email_status = f"FAILED: {mail_err}"
-
-    # 5. Record Milestone in Central Pipeline Status Tracker (Step 7)
-    tracker_notes = notes or f"Kickoff email sent to {clean_lead}. Debrief Doc and Visuals subfolder ready. Deadline: {deadline_str}"
-    try:
-        handle_log_pipeline_status(
-            mission_name=clean_mission,
-            status="LAUNCHED",
-            client=clean_client,
-            lead_email=clean_lead,
-            folder_url=mission_folder_url,
-            notes=tracker_notes
-        )
-    except Exception as log_err:
-        print(f"[Launch Mission] Status logging warning: {log_err}")
-
-    return {
-        "status": "LAUNCHED",
-        "missionName": clean_mission,
-        "client": clean_client,
-        "leadEmail": clean_lead,
-        "teamEmails": normalized_team_emails,
-        "deadlineDate": deadline_str,
-        "folderId": mission_folder_id,
-        "folderName": mission_folder_name,
-        "folderUrl": mission_folder_url,
-        "docId": doc_id,
-        "docUrl": doc_url,
-        "visualsFolderId": visuals_folder_id,
-        "visualsFolderUrl": visuals_folder_url,
-        "emailStatus": email_status
-    }
-
-
-def handle_extract_documents(folder_raw: str) -> Dict[str, Any]:
-    folder_id = parse_folder_id(folder_raw)
-    drive_svc = get_drive_service()
-
-    # 1. Fetch Folder Metadata
-    folder_meta = drive_svc.files().get(
-        fileId=folder_id,
-        fields="id, name, mimeType",
-        supportsAllDrives=True
-    ).execute()
-    mission_name = folder_meta.get("name", "Mission").replace("TEST_", "").strip()
-
-    # 2. List Files in Folder
-    query = f"'{folder_id}' in parents and trashed = false"
-    res = drive_svc.files().list(
-        q=query,
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        fields="files(id, name, mimeType, modifiedTime, size)"
-    ).execute()
-
-    raw_files = res.get("files", [])
-    extracted_files = []
-
-    for f in raw_files:
-        fname = f["name"]
-        fid = f["id"]
-        mime = f["mimeType"]
-
-        # Exclude existing generated outputs to avoid self-ingestion loops
-        if fname.startswith("[One-Pager]") or fname.startswith("[Checklist & Audit]"):
-            continue
-
-        content = ""
-        try:
-            if mime == "application/vnd.google-apps.document":
-                data = drive_svc.files().export(fileId=fid, mimeType="text/plain").execute()
-                content = data.decode("utf-8", errors="ignore")
-            elif mime == "application/vnd.google-apps.presentation":
-                data = drive_svc.files().export(fileId=fid, mimeType="text/plain").execute()
-                content = data.decode("utf-8", errors="ignore")
-            elif mime.startswith("text/") or fname.endswith((".txt", ".md", ".csv", ".json", ".py", ".sql")):
-                data = drive_svc.files().get_media(fileId=fid).execute()
-                content = data.decode("utf-8", errors="ignore")
-            else:
-                content = f"Binary/Non-text file: {fname} ({mime})"
-        except Exception as read_err:
-            content = f"[Warning: Could not extract full text: {read_err}]"
-
-        # Safeguard character cap per file
-        truncated_content = content[:10000]
-        extracted_files.append({
-            "id": fid,
-            "name": fname,
-            "mimeType": mime,
-            "content": truncated_content
-        })
-
-    aggregated_context = "\n\n".join(
-        [f"--- FILE: {item['name']} ---\n{item['content']}" for item in extracted_files]
-    )
-
-    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-
-    # Step 7: Record milestone into Central Status Tracker
-    try:
-        handle_log_pipeline_status(
-            mission_name=mission_name,
-            status="DOCS_EXTRACTED",
-            folder_url=folder_url,
-            notes=f"Extracted {len(extracted_files)} files from Drive folder"
-        )
-    except Exception as e:
-        print(f"[Tracker] Step 7 auto-log warning in extract_documents: {e}")
-
-    return {
-        "folderId": folder_id,
-        "missionName": mission_name,
-        "filesCount": len(extracted_files),
-        "files": extracted_files,
-        "aggregatedContext": aggregated_context
-    }
-
-
-def handle_generate_slide(folder_raw: str, mission_name: str, card: Any, template_id: Optional[str] = None) -> Dict[str, Any]:
-    folder_id = parse_folder_id(folder_raw)
-    creds = get_credentials()
-    drive_svc = get_drive_service(creds)
-    slides_svc = get_slides_service(creds)
-
-    if isinstance(card, str):
-        try:
-            cleaned = card.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-                cleaned = re.sub(r"\s*```$", "", cleaned)
-            card = json.loads(cleaned)
-        except Exception:
-            card = {"context": card}
-    elif not isinstance(card, dict):
-        card = {}
-
-    template_id = template_id or "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
-    new_title = f"[One-Pager] {mission_name}"
-
-    # Deduplication: clean up any existing duplicate presentations in target mission folder
-    try:
-        dup_query = f"'{folder_id}' in parents and name = '{new_title}' and mimeType = 'application/vnd.google-apps.presentation' and trashed = false"
-        dup_res = drive_svc.files().list(
-            q=dup_query,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name)"
-        ).execute()
-        for existing in dup_res.get("files", []):
-            try:
-                drive_svc.files().delete(fileId=existing["id"], supportsAllDrives=True).execute()
-            except Exception:
-                try:
-                    drive_svc.files().update(
-                        fileId=existing["id"],
-                        body={"name": f"[Archive - {datetime.now().strftime('%Y%m%d_%H%M')}] {new_title}"},
-                        supportsAllDrives=True
-                    ).execute()
-                except Exception:
-                    pass
-    except Exception as dup_err:
-        print(f"[Slide Deduplication Warning] Could not check/clean stale presentations: {dup_err}")
-
-    # 1. Copy Master Slide Template to Target Mission Folder
-    copy_body = {
-        "name": new_title,
-        "parents": [folder_id]
-    }
-    copied_file = drive_svc.files().copy(
-        fileId=template_id,
-        body=copy_body,
-        supportsAllDrives=True,
-        fields="id, webViewLink"
-    ).execute()
-
-    presentation_id = copied_file["id"]
-    presentation_url = copied_file.get("webViewLink", f"https://docs.google.com/presentation/d/{presentation_id}/edit")
-
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    context_val = card.get("context") or card.get("Context") or ""
-    deliverables_val = card.get("deliverables") or card.get("Deliverables") or ""
-    impact_val = card.get("businessImpact") or card.get("business_impact") or card.get("BusinessImpact") or ""
-    recs_val = card.get("recommendations") or card.get("Recommendations") or ""
-    synthesis_val = card.get("synthesis") or card.get("Synthesis") or context_val
-
-    # 2. Build Slide Replace Requests
-    requests = [
-        {"replaceAllText": {"replaceText": mission_name, "containsText": {"matchCase": True, "text": "{{MISSION_NAME}}"}}},
-        {"replaceAllText": {"replaceText": today_str, "containsText": {"matchCase": True, "text": "{{DATE}}"}}},
-        {"replaceAllText": {"replaceText": format_card_text(context_val), "containsText": {"matchCase": True, "text": "{{CONTEXT}}"}}},
-        {"replaceAllText": {"replaceText": format_card_text(deliverables_val), "containsText": {"matchCase": True, "text": "{{DELIVERABLES}}"}}},
-        {"replaceAllText": {"replaceText": format_card_text(impact_val), "containsText": {"matchCase": True, "text": "{{BUSINESS_IMPACT}}"}}},
-        {"replaceAllText": {"replaceText": format_card_text(recs_val), "containsText": {"matchCase": True, "text": "{{RECOMMENDATIONS}}"}}},
-        {"replaceAllText": {"replaceText": format_card_text(synthesis_val), "containsText": {"matchCase": True, "text": "{{SYNTHESIS}}"}}}
-    ]
-
-    # 3. Batch Update Slide Deck
-    slides_svc.presentations().batchUpdate(
-        presentationId=presentation_id,
-        body={"requests": requests}
-    ).execute()
-
-    # Step 7: Record milestone into Central Status Tracker
-    try:
-        handle_log_pipeline_status(
-            mission_name=mission_name,
-            status="DECK_GENERATED",
-            deck_url=presentation_url,
-            notes="Executive one-pager slide deck generated"
-        )
-    except Exception as e:
-        print(f"[Tracker] Step 7 auto-log warning in generate_slide: {e}")
-
-    return {
-        "presentationId": presentation_id,
-        "presentationUrl": presentation_url,
-        "title": new_title
-    }
-
-
-def handle_create_audit_sheet(folder_raw: str, mission_name: str, audit_records: Any) -> Dict[str, Any]:
-    folder_id = parse_folder_id(folder_raw)
-    creds = get_credentials()
-    drive_svc = get_drive_service(creds)
-    sheets_svc = get_sheets_service(creds)
-
-    if isinstance(audit_records, str):
-        try:
-            cleaned = audit_records.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-                cleaned = re.sub(r"\s*```$", "", cleaned)
-            audit_records = json.loads(cleaned)
-        except Exception:
-            audit_records = []
-    elif not isinstance(audit_records, list):
-        audit_records = []
-
-    sheet_title = f"[Checklist & Audit] {mission_name}"
-    tab_name = "Knowledge Audit"
-
-    # Deduplication: Check if an audit spreadsheet already exists in the mission folder
-    existing_files = []
-    try:
-        search_query = f"'{folder_id}' in parents and name = '{sheet_title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
-        res = drive_svc.files().list(
-            q=search_query,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-            fields="files(id, name, webViewLink)"
-        ).execute()
-        existing_files = res.get("files", [])
-    except Exception as search_err:
-        print(f"[Audit Sheet Search Warning]: {search_err}")
-
-    if existing_files:
-        # Reuse canonical existing spreadsheet
-        spreadsheet_id = existing_files[0]["id"]
-        spreadsheet_url = existing_files[0].get("webViewLink", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
-
-        # Clean up any duplicate spreadsheets created on previous runs
-        for extra in existing_files[1:]:
-            try:
-                drive_svc.files().delete(fileId=extra["id"], supportsAllDrives=True).execute()
-            except Exception:
-                pass
-
-        # Inspect tabs to locate Knowledge Audit sheetId
-        target_sheet_id = 0
-        try:
-            ss_meta = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-            sheets_list = ss_meta.get("sheets", [])
-            tab_found = False
-            for s in sheets_list:
-                props = s.get("properties", {})
-                if props.get("title") == tab_name:
-                    target_sheet_id = props.get("sheetId", 0)
-                    tab_found = True
-                    break
-
-            if not tab_found and sheets_list:
-                target_sheet_id = sheets_list[0].get("properties", {}).get("sheetId", 0)
-                sheets_svc.spreadsheets().batchUpdate(
-                    spreadsheetId=spreadsheet_id,
-                    body={"requests": [{
-                        "updateSheetProperties": {
-                            "properties": {"sheetId": target_sheet_id, "title": tab_name},
-                            "fields": "title"
-                        }
-                    }]}
-                ).execute()
-
-            # Clear existing data on the tab to prevent residual stale rows
-            sheets_svc.spreadsheets().values().clear(
-                spreadsheetId=spreadsheet_id,
-                range=f"'{tab_name}'!A:Z"
-            ).execute()
-        except Exception as inspect_err:
-            print(f"[Audit Sheet Reuse Warning]: {inspect_err}")
-
-    else:
-        # 1. Create Spreadsheet
-        ss_body = {
-            "properties": {"title": sheet_title},
-            "sheets": [{"properties": {"sheetId": 0, "title": tab_name}}]
-        }
-        ss = sheets_svc.spreadsheets().create(
-            body=ss_body,
-            fields="spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title))"
-        ).execute()
-        spreadsheet_id = ss["spreadsheetId"]
-        spreadsheet_url = ss.get("spreadsheetUrl", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
-        target_sheet_id = ss.get("sheets", [{}])[0].get("properties", {}).get("sheetId", 0)
-
-        # 2. Move Spreadsheet to Target Mission Folder
-        drive_svc.files().update(
-            fileId=spreadsheet_id,
-            addParents=folder_id,
-            removeParents="root",
-            supportsAllDrives=True,
-            fields="id, parents"
-        ).execute()
-
-    # 3. Prepare Header & Rows
-    values = [["Filename", "Confidentiality Risk", "Suggested Tags", "To Be Exported"]]
-    max_risk = "LOW"
-    risk_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
-    current_max_val = 1
-
-    for item in audit_records:
-        tags = item.get("suggestedTags", "")
-        if isinstance(tags, list):
-            tags = ", ".join(tags)
-        item_risk = str(item.get("confidentialityRisk", "MEDIUM")).upper()
-        if risk_rank.get(item_risk, 0) > current_max_val:
-            current_max_val = risk_rank.get(item_risk, 0)
-            max_risk = item_risk
-
-        values.append([
-            str(item.get("filename", "Unknown")),
-            item_risk,
-            str(tags),
-            bool(item.get("toBeExported", False))
-        ])
-
-    # 4. Write Values
-    sheets_svc.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=f"'{tab_name}'!A1:D",
-        valueInputOption="USER_ENTERED",
-        body={"values": values}
-    ).execute()
-
-    # 5. Format Header & Add Checkbox Validation
-    row_count = len(values)
-    format_requests = [
-        # Header Style (Blue #4285F4 background, bold white text)
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": target_sheet_id,
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": 4
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "backgroundColor": {"red": 0.258, "green": 0.521, "blue": 0.956},
-                        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}
-                    }
-                },
-                "fields": "userEnteredFormat(backgroundColor,textFormat)"
-            }
-        },
-        # Checkbox Validation on Column D
-        {
-            "setDataValidation": {
-                "range": {
-                    "sheetId": target_sheet_id,
-                    "startRowIndex": 1,
-                    "endRowIndex": row_count,
-                    "startColumnIndex": 3,
-                    "endColumnIndex": 4
-                },
-                "rule": {
-                    "condition": {"type": "BOOLEAN"},
-                    "showCustomUi": True,
-                    "strict": True
-                }
-            }
-        },
-        # Auto-resize columns A to D
-        {
-            "autoResizeDimensions": {
-                "dimensions": {
-                    "sheetId": target_sheet_id,
-                    "dimension": "COLUMNS",
-                    "startIndex": 0,
-                    "endIndex": 4
-                }
-            }
-        }
-    ]
-
-    sheets_svc.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": format_requests}
-    ).execute()
-
-    # Step 7: Record milestone into Central Status Tracker
-    try:
-        handle_log_pipeline_status(
-            mission_name=mission_name,
-            status="AUDIT_READY",
-            audit_url=spreadsheet_url,
-            risk=max_risk,
-            notes=f"Audit completed: {len(audit_records)} assets assessed"
-        )
-    except Exception as e:
-        print(f"[Tracker] Step 7 auto-log warning in create_audit_sheet: {e}")
-
-    return {
-        "spreadsheetId": spreadsheet_id,
-        "spreadsheetUrl": spreadsheet_url,
-        "title": sheet_title,
-        "rowsCount": len(audit_records)
-    }
-
-
-def handle_send_notification(recipient_email: str, mission_name: str, slide_url: str, sheet_url: str) -> Dict[str, Any]:
-    creds = get_credentials()
-    subject = f"[Completed] End of Mission Artifacts: {mission_name}"
-
-    html_content = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px;">
-      <h2 style="color: #1a73e8;">Mission Closure Automation Completed</h2>
-      <p>Hello,</p>
-      <p>The automated End-of-Mission analysis for <strong>{mission_name}</strong> has completed successfully. Your AI-generated artifacts are ready:</p>
-      
-      <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-        <tr>
-          <td style="padding: 12px; border: 1px solid #ddd; background: #f8f9fa;">
-            <strong>Agent 1: Executive One-Pager</strong>
-          </td>
-          <td style="padding: 12px; border: 1px solid #ddd;">
-            <a href="{slide_url}" target="_blank" style="color: #1a73e8; font-weight: bold; text-decoration: none;">
-              Open Google Slides &rarr;
-            </a>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding: 12px; border: 1px solid #ddd; background: #f8f9fa;">
-            <strong>Agent 2: Knowledge & Confidentiality Checklist</strong>
-          </td>
-          <td style="padding: 12px; border: 1px solid #ddd;">
-            <a href="{sheet_url}" target="_blank" style="color: #1a73e8; font-weight: bold; text-decoration: none;">
-              Open Google Sheets &rarr;
-            </a>
-          </td>
-        </tr>
-      </table>
-
-      <p style="font-size: 13px; color: #666;">
-        <em>Next steps: Review the checkboxes in the Knowledge Checklist before final export to the internal repository.</em>
-      </p>
-    </div>
-    """
-
-    try:
-        gmail_svc = get_gmail_service(creds)
-        message = MIMEText(html_content, "html")
-        message["to"] = recipient_email
-        message["subject"] = subject
-        raw_msg = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-        gmail_svc.users().messages().send(userId="me", body={"raw": raw_msg}).execute()
-        status = "sent_via_gmail_api"
-    except Exception as mail_err:
-        print(f"[Mail Warning] Gmail API send fallback: {mail_err}")
-        status = f"simulated_delivery: {str(mail_err)}"
-
-    # Step 7: Record milestone into Central Status Tracker
-    try:
-        handle_log_pipeline_status(
-            mission_name=mission_name,
-            status="NOTIFIED_LEAD",
-            lead_email=recipient_email,
-            deck_url=slide_url,
-            audit_url=sheet_url,
-            notes=f"Debrief artifacts emailed to {recipient_email}"
-        )
-    except Exception as e:
-        print(f"[Tracker] Step 7 auto-log warning in send_notification: {e}")
-
-    return {
-        "status": status,
-        "recipientEmail": recipient_email,
-        "missionName": mission_name
-    }
 
 # =============================================================================
 # FASTAPI APPLICATION FOR CLOUD RUN & AGENT DESIGNER
@@ -1311,6 +114,10 @@ class LaunchMissionRequest(BaseModel):
     deadlineDate: Optional[str] = None
     deadline_date: Optional[str] = None
     notes: Optional[str] = None
+    originalLeadEmail: Optional[str] = None
+    original_lead_email: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
 
     def get_mission_name(self) -> str:
         name = self.missionName or self.mission_name
@@ -1324,6 +131,12 @@ class LaunchMissionRequest(BaseModel):
             raise ValueError("leadEmail or lead_email is required")
         return em
 
+    def get_original_lead_email(self) -> Optional[str]:
+        return self.originalLeadEmail or self.original_lead_email
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
     def get_team_emails(self) -> Optional[Any]:
         return self.teamEmails if self.teamEmails is not None else self.team_emails
 
@@ -1335,6 +148,28 @@ class LaunchMissionRequest(BaseModel):
 
     def get_deadline_date(self) -> Optional[str]:
         return self.deadlineDate or self.deadline_date
+
+class SendAntichamberNotificationRequest(BaseModel):
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    client: str
+    missions: Optional[List[Dict[str, Any]]] = None
+    antichamberUrl: Optional[str] = None
+    antichamber_url: Optional[str] = None
+    ccEmails: Optional[List[str]] = None
+    cc_emails: Optional[List[str]] = None
+
+    def get_lead_email(self) -> str:
+        em = self.leadEmail or self.lead_email
+        if not em:
+            raise ValueError("leadEmail or lead_email is required")
+        return em
+
+    def get_antichamber_url(self) -> Optional[str]:
+        return self.antichamberUrl or self.antichamber_url
+
+    def get_cc_emails(self) -> Optional[List[str]]:
+        return self.ccEmails or self.cc_emails
 
 class DetectMissionsRequest(BaseModel):
     daysAhead: Optional[int] = 7
@@ -1388,6 +223,8 @@ class DetectAndLaunchRequest(BaseModel):
     dry_run: Optional[bool] = None
     overrideLeadEmail: Optional[str] = None
     override_lead_email: Optional[str] = None
+    exactDate: Optional[bool] = False
+    exact_date: Optional[bool] = None
     parentFolderId: Optional[str] = None
     parent_folder_id: Optional[str] = None
     trackerId: Optional[str] = None
@@ -1424,11 +261,146 @@ class DetectAndLaunchRequest(BaseModel):
     def get_override_lead_email(self) -> Optional[str]:
         return self.overrideLeadEmail or self.override_lead_email
 
+    def get_exact_date(self) -> bool:
+        if self.exact_date is not None:
+            return self.exact_date
+        return self.exactDate if self.exactDate is not None else False
+
     def get_parent_folder_id(self) -> Optional[str]:
         return self.parentFolderId or self.parent_folder_id
 
     def get_tracker_id(self) -> Optional[str]:
         return self.trackerId or self.tracker_id
+
+
+class ValidateDebriefRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_doc_id(self) -> Optional[str]:
+        return self.docId or self.doc_id
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
+
+class PrefillDebriefRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    teamEmails: Optional[Any] = None
+    team_emails: Optional[Any] = None
+    deadlineDate: Optional[str] = None
+    deadline_date: Optional[str] = None
+    industry: Optional[str] = None
+    prefilledPayload: Optional[Dict[str, Any]] = None
+    prefilled_payload: Optional[Dict[str, Any]] = None
+    originalLeadEmail: Optional[str] = None
+    original_lead_email: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+    notes: Optional[str] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_team_emails(self) -> Optional[Any]:
+        return self.teamEmails if self.teamEmails is not None else self.team_emails
+
+    def get_deadline_date(self) -> Optional[str]:
+        return self.deadlineDate or self.deadline_date
+
+    def get_prefilled_payload(self) -> Optional[Dict[str, Any]]:
+        return self.prefilledPayload if self.prefilledPayload is not None else self.prefilled_payload
+
+    def get_original_lead_email(self) -> Optional[str]:
+        return self.originalLeadEmail or self.original_lead_email
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
+
+class WrapupMissionRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    personaCards: Optional[Dict[str, Any]] = None
+    persona_cards: Optional[Dict[str, Any]] = None
+    personaImages: Optional[Dict[str, Any]] = None
+    persona_images: Optional[Dict[str, Any]] = None
+    auditRecords: Optional[List[Dict[str, Any]]] = None
+    audit_records: Optional[List[Dict[str, Any]]] = None
+    industry: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_doc_id(self) -> Optional[str]:
+        return self.docId or self.doc_id
+
+    def get_persona_cards(self) -> Optional[Dict[str, Any]]:
+        return self.personaCards if self.personaCards is not None else self.persona_cards
+
+    def get_persona_images(self) -> Optional[Dict[str, Any]]:
+        return self.personaImages if self.personaImages is not None else self.persona_images
+
+    def get_audit_records(self) -> Optional[List[Dict[str, Any]]]:
+        return self.auditRecords if self.auditRecords is not None else self.audit_records
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
 
 class ExtractDocumentsRequest(BaseModel):
     folderId: Optional[str] = None
@@ -1448,8 +420,10 @@ class GenerateSlideRequest(BaseModel):
     cardData: Optional[Any] = None
     card_data: Optional[Any] = None
     card: Optional[Any] = None
-    templateId: Optional[str] = "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
+    templateId: Optional[str] = "1DH-zXzB9CmaYB-p0CyXJDR-gdeJ6gSvylM-76IPfkEY"
     template_id: Optional[str] = None
+    personae: Optional[List[str]] = None
+    client: Optional[str] = None
 
     def get_folder_id(self) -> str:
         fid = self.folderId or self.folder_id
@@ -1464,7 +438,13 @@ class GenerateSlideRequest(BaseModel):
         return self.cardData if self.cardData is not None else (self.card_data if self.card_data is not None else self.card)
 
     def get_template_id(self) -> str:
-        return self.template_id or self.templateId or "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
+        return self.template_id or self.templateId or "1DH-zXzB9CmaYB-p0CyXJDR-gdeJ6gSvylM-76IPfkEY"
+
+    def get_personae(self) -> Optional[List[str]]:
+        return self.personae
+
+    def get_client(self) -> Optional[str]:
+        return self.client
 
 class CreateAuditSheetRequest(BaseModel):
     folderId: Optional[str] = None
@@ -1496,6 +476,13 @@ class SendNotificationRequest(BaseModel):
     slide_url: Optional[str] = ""
     sheetUrl: Optional[str] = ""
     sheet_url: Optional[str] = ""
+    client: Optional[str] = None
+    folderUrl: Optional[str] = None
+    folder_url: Optional[str] = None
+    industry: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+    cc: Optional[Any] = None
 
     def get_recipient_email(self) -> str:
         em = self.recipientEmail or self.recipient_email or self.email
@@ -1511,6 +498,18 @@ class SendNotificationRequest(BaseModel):
 
     def get_sheet_url(self) -> str:
         return self.sheetUrl or self.sheet_url or ""
+
+    def get_client(self) -> Optional[str]:
+        return self.client or None
+
+    def get_folder_url(self) -> Optional[str]:
+        return self.folderUrl or self.folder_url or None
+
+    def get_industry(self) -> Optional[str]:
+        return self.industry or None
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails or self.cc_emails or self.cc or None
 
 class LogPipelineStatusRequest(BaseModel):
     missionName: Optional[str] = None
@@ -1635,6 +634,136 @@ class TriggerRemindersRequest(BaseModel):
         return self.trackerId or self.tracker_id
 
 
+class ValidateDebriefRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_doc_id(self) -> Optional[str]:
+        return self.docId or self.doc_id
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
+
+class PrefillDebriefRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    teamEmails: Optional[Any] = None
+    team_emails: Optional[Any] = None
+    deadlineDate: Optional[str] = None
+    deadline_date: Optional[str] = None
+    industry: Optional[str] = None
+    prefilledPayload: Optional[Dict[str, Any]] = None
+    prefilled_payload: Optional[Dict[str, Any]] = None
+    originalLeadEmail: Optional[str] = None
+    original_lead_email: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+    notes: Optional[str] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_team_emails(self) -> Optional[Any]:
+        return self.teamEmails if self.teamEmails is not None else self.team_emails
+
+    def get_deadline_date(self) -> Optional[str]:
+        return self.deadlineDate or self.deadline_date
+
+    def get_prefilled_payload(self) -> Optional[Dict[str, Any]]:
+        return self.prefilledPayload if self.prefilledPayload is not None else self.prefilled_payload
+
+    def get_original_lead_email(self) -> Optional[str]:
+        return self.originalLeadEmail or self.original_lead_email
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
+
+class WrapupMissionRequest(BaseModel):
+    folderId: Optional[str] = None
+    folder_id: Optional[str] = None
+    missionName: Optional[str] = None
+    mission_name: Optional[str] = None
+    client: Optional[str] = None
+    leadEmail: Optional[str] = None
+    lead_email: Optional[str] = None
+    docId: Optional[str] = None
+    doc_id: Optional[str] = None
+    personaCards: Optional[Dict[str, Any]] = None
+    persona_cards: Optional[Dict[str, Any]] = None
+    personaImages: Optional[Dict[str, Any]] = None
+    persona_images: Optional[Dict[str, Any]] = None
+    auditRecords: Optional[List[Dict[str, Any]]] = None
+    audit_records: Optional[List[Dict[str, Any]]] = None
+    industry: Optional[str] = None
+    ccEmails: Optional[Any] = None
+    cc_emails: Optional[Any] = None
+
+    def get_folder_id(self) -> str:
+        fid = self.folderId or self.folder_id
+        if not fid:
+            raise ValueError("folderId or folder_id is required")
+        return fid
+
+    def get_mission_name(self) -> Optional[str]:
+        return self.missionName or self.mission_name
+
+    def get_lead_email(self) -> Optional[str]:
+        return self.leadEmail or self.lead_email
+
+    def get_doc_id(self) -> Optional[str]:
+        return self.docId or self.doc_id
+
+    def get_persona_cards(self) -> Optional[Dict[str, Any]]:
+        return self.personaCards if self.personaCards is not None else self.persona_cards
+
+    def get_persona_images(self) -> Optional[Dict[str, Any]]:
+        return self.personaImages if self.personaImages is not None else self.persona_images
+
+    def get_audit_records(self) -> Optional[List[Dict[str, Any]]]:
+        return self.auditRecords if self.auditRecords is not None else self.audit_records
+
+    def get_cc_emails(self) -> Optional[Any]:
+        return self.ccEmails if self.ccEmails is not None else self.cc_emails
+
+
+
 @app.get("/")
 @app.get("/healthz")
 def health_check():
@@ -1660,14 +789,16 @@ def api_get_upcoming_missions(
     days_ahead: Optional[int] = 7,
     target_date: Optional[str] = None,
     client: Optional[str] = None,
-    limit: Optional[int] = 50
+    limit: Optional[int] = 50,
+    exact_date: Optional[bool] = False
 ):
     try:
         return query_upcoming_missions(
             days_ahead=days_ahead if not target_date else None,
             target_date=target_date,
             client_name=client,
-            limit=limit or 50
+            limit=limit or 50,
+            exact_date=exact_date if exact_date is not None else False
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1686,7 +817,8 @@ def api_detect_and_launch(req: DetectAndLaunchRequest):
             override_lead_email=req.get_override_lead_email(),
             parent_folder_id=req.get_parent_folder_id(),
             tracker_id=req.get_tracker_id(),
-            limit=req.limit or 10
+            limit=req.limit or 10,
+            exact_date=req.get_exact_date()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1703,7 +835,9 @@ def api_launch_mission(req: LaunchMissionRequest):
             parent_folder_id=req.get_parent_folder_id(),
             deadline_date=req.get_deadline_date(),
             notes=req.notes,
-            industry=req.industry
+            industry=req.industry,
+            original_lead_email=req.get_original_lead_email(),
+            cc_emails=req.get_cc_emails()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1762,7 +896,9 @@ def api_generate_slide(req: GenerateSlideRequest):
             folder_raw=req.get_folder_id(),
             mission_name=req.get_mission_name(),
             card=req.get_card_data(),
-            template_id=req.get_template_id()
+            template_id=req.get_template_id(),
+            personae=req.get_personae(),
+            client=req.get_client()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1785,7 +921,11 @@ def api_send_notification(req: SendNotificationRequest):
             recipient_email=req.get_recipient_email(),
             mission_name=req.get_mission_name(),
             slide_url=req.get_slide_url(),
-            sheet_url=req.get_sheet_url()
+            sheet_url=req.get_sheet_url(),
+            client=req.get_client(),
+            folder_url=req.get_folder_url(),
+            industry=req.get_industry(),
+            cc_emails=req.get_cc_emails()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1804,6 +944,1081 @@ def api_log_pipeline_status(req: LogPipelineStatusRequest):
             folder_url=req.get_folder_url(),
             risk=req.risk,
             notes=req.notes
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# ANTICHAMBER (PRE-KICKOFF STAGING) HTML RENDERERS & ENDPOINTS
+# =============================================================================
+
+def render_antichamber_page(
+    client: str,
+    lead_email: str,
+    candidate_missions: List[Dict[str, Any]]
+) -> str:
+    """Renders the responsive Artefact Antichamber staging web portal."""
+    mission_cards_html = ""
+    default_names = []
+
+    for idx, m in enumerate(candidate_missions):
+        mid = m.get("mission_id", f"MIS-{idx+1}")
+        mname = m.get("mission_name", "Mission")
+        edate = m.get("end_date", "J+7")
+        default_names.append(mname)
+        
+        mission_cards_html += f"""
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: flex-start; gap: 12px; transition: border-color 0.2s;">
+          <input type="checkbox" id="m_{idx}" name="selected_mission_ids" value="{mid}" data-name="{mname}" checked onchange="handleCheckboxChange()" style="margin-top: 3px; width: 18px; height: 18px; accent-color: #1a73e8; cursor: pointer;">
+          <label for="m_{idx}" style="cursor: pointer; flex: 1;">
+            <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;">
+              <strong style="color: #0f172a; font-size: 14px;">{mname}</strong>
+              <span style="background-color: #f1f5f9; color: #475569; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; font-family: monospace;">{mid}</span>
+            </div>
+            <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
+              📅 Fin prévue : <strong>{edate}</strong> &bull; Client : {client}
+            </div>
+          </label>
+        </div>
+        """
+
+    initial_title = " + ".join(default_names) if default_names else f"Mission {client}"
+
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antichambre EOM • {client}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+      margin: 0;
+      padding: 30px 15px;
+      line-height: 1.5;
+    }}
+    .container {{
+      max-width: 680px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+      overflow: hidden;
+    }}
+    .header {{
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 24px 28px;
+    }}
+    .badge {{
+      display: inline-block;
+      background-color: #3b82f6;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }}
+    .header h1 {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+    }}
+    .header p {{
+      margin: 6px 0 0 0;
+      color: #94a3b8;
+      font-size: 13px;
+    }}
+    .content {{
+      padding: 28px;
+    }}
+    .section-title {{
+      font-size: 15px;
+      font-weight: 700;
+      color: #0f172a;
+      margin: 22px 0 10px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .section-title:first-of-type {{
+      margin-top: 0;
+    }}
+    .radio-card {{
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+    }}
+    .radio-card:hover {{
+      border-color: #cbd5e1;
+    }}
+    .radio-card input {{
+      accent-color: #1a73e8;
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }}
+    .form-group {{
+      margin-bottom: 18px;
+    }}
+    .form-group label {{
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 6px;
+    }}
+    .form-control {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #0f172a;
+      background: #ffffff;
+    }}
+    .form-control:focus {{
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.15);
+    }}
+    .tip-box {{
+      background-color: #eff6ff;
+      border-left: 4px solid #1a73e8;
+      padding: 12px 14px;
+      border-radius: 4px;
+      font-size: 13px;
+      color: #1e3a8a;
+      margin-top: 8px;
+    }}
+    .helper-text {{
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 5px;
+    }}
+    .btn-submit {{
+      width: 100%;
+      background-color: #1a73e8;
+      color: #ffffff;
+      border: none;
+      padding: 14px;
+      border-radius: 6px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color 0.2s;
+      margin-top: 24px;
+    }}
+    .btn-submit:hover {{
+      background-color: #1557b0;
+    }}
+    .btn-reset {{
+      background-color: #f1f5f9;
+      color: #475569;
+      border: 1px solid #cbd5e1;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .btn-reset:hover {{
+      background-color: #e2e8f0;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="badge">Artefact EOM Agent &bull; Étape 1</div>
+      <h1>Antichambre de Cadrage</h1>
+      <p>Client : <strong>{client}</strong> &bull; Lead Détecté : <strong>{lead_email}</strong></p>
+    </div>
+
+    <form class="content" action="/antichamber/confirm" method="POST" id="antichamber-form">
+      <input type="hidden" name="client" value="{client}">
+      <input type="hidden" name="lead_email" value="{lead_email}">
+
+      <!-- 1. Ownership Confirmation -->
+      <div class="section-title">1. Validation de Responsabilité (Ownership)</div>
+      <label class="radio-card">
+        <input type="radio" name="action" value="confirm" checked onchange="handleActionChange()">
+        <div>
+          <strong style="color: #0f172a; font-size: 14px;">✅ Oui, je confirme être le lead / manager de ce périmètre</strong>
+        </div>
+      </label>
+      <label class="radio-card">
+        <input type="radio" name="action" value="reassign" onchange="handleActionChange()">
+        <div>
+          <strong style="color: #0f172a; font-size: 14px;">🔄 Non, réassigner à un autre lead</strong>
+        </div>
+      </label>
+      <div id="reassign-block" style="display: none; margin: 10px 0 16px 26px;">
+        <label style="font-size: 13px; font-weight: 600; color: #334155;">Email du nouveau Lead / Manager :</label>
+        <input type="email" name="reassign_email" id="reassign_email" class="form-control" placeholder="prenom.nom@artefact.com" style="margin-top: 4px;">
+        <div class="helper-text">L'invitation d'Antichambre lui sera automatiquement réadressée.</div>
+      </div>
+
+      <label class="radio-card">
+        <input type="radio" name="action" value="exclude" onchange="handleActionChange()">
+        <div>
+          <strong style="color: #0f172a; font-size: 14px;">❌ Exclure ce périmètre (hors champ / régie sans livrable)</strong>
+        </div>
+      </label>
+      <div id="exclude-block" style="display: none; margin: 10px 0 16px 26px;">
+        <label style="font-size: 13px; font-weight: 600; color: #334155;">Motif de l'exclusion :</label>
+        <input type="text" name="exclude_reason" id="exclude_reason" class="form-control" placeholder="ex: Prestation régie pure sans livrable capitalisable" style="margin-top: 4px;">
+      </div>
+
+      <!-- Configurable Fields Container -->
+      <div id="config-fields">
+        <!-- 2. Missions & Bundling -->
+        <div class="section-title" style="margin-top: 26px;">2. Périmètre & Regroupement de Missions (Bundling)</div>
+        <p class="helper-text" style="margin-top: 0; margin-bottom: 12px;">
+          Sélectionnez les missions à regrouper dans ce débrief. Un seul Google Doc et un One-Pager Slides unifié seront générés.
+        </p>
+
+        {mission_cards_html}
+
+        <div class="form-group" style="margin-top: 16px;">
+          <label for="custom_project_name">Nom consolidé du projet pour le One-Pager :</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="custom_project_name" name="custom_project_name" class="form-control" value="{initial_title}" oninput="handleTitleManualEdit()" required>
+            <button type="button" id="btn-reset-title" class="btn-reset" onclick="resetProjectName()" style="display: none;">↺ Nom auto</button>
+          </div>
+          <div class="helper-text">Titre affiché sur la slide exécutive Google Slides et le Google Doc. Vous pouvez le renommer librement.</div>
+        </div>
+
+        <!-- 3. Delegation & Team -->
+        <div class="section-title" style="margin-top: 26px;">3. Responsable Débrief & Délégation (Optionnel)</div>
+        <div class="form-group">
+          <label for="delegate_email">Responsable de la rédaction du débrief (Délégation) :</label>
+          <input type="email" id="delegate_email" name="delegate_email" class="form-control" placeholder="ex: senior.consultant@artefact.com">
+          <div class="tip-box">
+            💡 <strong>Fonctionnement de la délégation :</strong> Si vous renseignez un email, cette personne recevra l'email de kickoff et sera le contact principal du template. <strong>Vous resterez automatiquement en copie (CC)</strong> pour superviser l'avancement et valider la checklist de conformité.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="cc_emails">Emails additionnels en copie (CC) :</label>
+          <input type="text" id="cc_emails" name="cc_emails" class="form-control" placeholder="consultant2@artefact.com, partner@artefact.com">
+          <div class="helper-text">Adresses séparées par des virgules.</div>
+        </div>
+
+        <!-- 4. Existing Folder -->
+        <div class="section-title" style="margin-top: 26px;">4. Dossier de Livrables Existant (Optionnel)</div>
+        <div class="form-group">
+          <label for="existing_folder_url">URL Google Drive existante (Livrables, Slides, Specs) :</label>
+          <input type="url" id="existing_folder_url" name="existing_folder_url" class="form-control" placeholder="https://drive.google.com/drive/folders/...">
+          <div class="helper-text">Si vous avez déjà un dossier Drive de livrables, l'agent IA en ingérera les documents pour enrichir le One-Pager.</div>
+        </div>
+      </div>
+
+      <button type="submit" id="submit-btn" class="btn-submit">🚀 Valider le périmètre & Initialiser l'espace EOM</button>
+    </form>
+  </div>
+
+  <script>
+    let isTitleManuallyEdited = false;
+
+    function handleTitleManualEdit() {{
+      isTitleManuallyEdited = true;
+      document.getElementById('btn-reset-title').style.display = 'inline-block';
+    }}
+
+    function resetProjectName() {{
+      isTitleManuallyEdited = false;
+      document.getElementById('btn-reset-title').style.display = 'none';
+      computeAutoTitle();
+    }}
+
+    function computeAutoTitle() {{
+      if (isTitleManuallyEdited) return;
+      const checkedBoxes = document.querySelectorAll('input[name="selected_mission_ids"]:checked');
+      const names = [];
+      checkedBoxes.forEach(cb => {{
+        const n = cb.getAttribute('data-name');
+        if (n) names.push(n.trim());
+      }});
+
+      const titleInput = document.getElementById('custom_project_name');
+      if (names.length === 0) {{
+        titleInput.value = "Mission {client}";
+      }} else if (names.length === 1) {{
+        titleInput.value = names[0];
+      }} else {{
+        titleInput.value = names.join(" + ");
+      }}
+    }}
+
+    function handleCheckboxChange() {{
+      computeAutoTitle();
+    }}
+
+    function handleActionChange() {{
+      const action = document.querySelector('input[name="action"]:checked').value;
+      const reassignBlock = document.getElementById('reassign-block');
+      const excludeBlock = document.getElementById('exclude-block');
+      const configFields = document.getElementById('config-fields');
+      const submitBtn = document.getElementById('submit-btn');
+
+      if (action === 'confirm') {{
+        reassignBlock.style.display = 'none';
+        excludeBlock.style.display = 'none';
+        configFields.style.opacity = '1';
+        configFields.style.pointerEvents = 'auto';
+        submitBtn.innerText = '🚀 Valider le périmètre & Initialiser l\'espace EOM';
+        submitBtn.style.backgroundColor = '#1a73e8';
+      }} else if (action === 'reassign') {{
+        reassignBlock.style.display = 'block';
+        excludeBlock.style.display = 'none';
+        configFields.style.opacity = '0.4';
+        configFields.style.pointerEvents = 'none';
+        submitBtn.innerText = '🔄 Réassigner l\'Antichambre au Nouveau Lead';
+        submitBtn.style.backgroundColor = '#0f172a';
+      }} else if (action === 'exclude') {{
+        reassignBlock.style.display = 'none';
+        excludeBlock.style.display = 'block';
+        configFields.style.opacity = '0.4';
+        configFields.style.pointerEvents = 'none';
+        submitBtn.innerText = '❌ Confirmer l\'Exclusion du Périmètre';
+        submitBtn.style.backgroundColor = '#dc2626';
+      }}
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+def render_antichamber_confirmation_page(
+    client: str,
+    project_name: str,
+    primary_lead: str,
+    lead_email: str,
+    cc_list: List[str],
+    launch_res: Dict[str, Any],
+    selected_ids: List[str]
+) -> str:
+    """Renders confirmation page after launch from Antichamber."""
+    doc_url = launch_res.get("docUrl", "#")
+    folder_url = launch_res.get("folderUrl", "#")
+    visuals_url = launch_res.get("visualsFolderUrl", "#")
+    email_status = launch_res.get("emailStatus", "SENT")
+
+    delegation_info = ""
+    if primary_lead != lead_email:
+        delegation_info = f"""
+        <div style="background-color: #eff6ff; border-left: 4px solid #1a73e8; padding: 12px 16px; border-radius: 4px; margin: 18px 0; font-size: 13px;">
+          👤 <strong>Délégation active :</strong> Kickoff envoyé à <strong>{primary_lead}</strong> (Rédacteur).<br>
+          Manager en copie (CC) : <strong>{lead_email}</strong>
+        </div>
+        """
+
+    cc_info = ""
+    if cc_list:
+        cc_info = f"<p style='font-size: 13px; color: #475569; margin: 4px 0 0 0;'>Emails en copie (CC) : <strong>{', '.join(cc_list)}</strong></p>"
+
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EOM Initialisé • {client}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+      margin: 0;
+      padding: 40px 15px;
+      line-height: 1.5;
+    }}
+    .container {{
+      max-width: 650px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+      overflow: hidden;
+    }}
+    .header {{
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 24px 28px;
+    }}
+    .badge {{
+      display: inline-block;
+      background-color: #16a34a;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }}
+    .header h1 {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }}
+    .header p {{
+      margin: 6px 0 0 0;
+      color: #94a3b8;
+      font-size: 13px;
+    }}
+    .content {{
+      padding: 28px;
+    }}
+    .btn {{
+      display: block;
+      text-align: center;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }}
+    .btn-primary {{
+      background-color: #1a73e8;
+      color: #ffffff;
+    }}
+    .btn-dark {{
+      background-color: #0f172a;
+      color: #ffffff;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="badge">✅ Workspace EOM Initialisé</div>
+      <h1>Cadrage Validé avec Succès</h1>
+      <p>Projet : <strong>{project_name}</strong> &bull; Client : <strong>{client}</strong></p>
+    </div>
+
+    <div class="content">
+      <p style="font-size: 15px; margin-top: 0;">
+        Le cadrage a été confirmé. Les espaces de travail Google Workspace ont été créés et l'email de lancement (kickoff) a été envoyé ({email_status}).
+      </p>
+
+      {delegation_info}
+      {cc_info}
+
+      <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 18px; margin: 20px 0;">
+        <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 14px;">📦 Ressources Initialisées :</h4>
+        <table style="width: 100%; border-collapse: separate; border-spacing: 0 8px;">
+          <tr>
+            <td style="padding-right: 6px; width: 50%;">
+              <a href="{doc_url}" target="_blank" class="btn btn-primary">📄 Google Doc Debrief Template &rarr;</a>
+            </td>
+            <td style="padding-left: 6px; width: 50%;">
+              <a href="{folder_url}" target="_blank" class="btn btn-dark">📁 Dossier Drive de Mission &rarr;</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding-right: 6px; width: 50%;">
+              <a href="{visuals_url}" target="_blank" style="display: block; text-align: center; background-color: #f1f5f9; color: #334155; padding: 10px 14px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 12px; border: 1px solid #cbd5e1;">
+                🖼️ Sous-dossier Visuels
+              </a>
+            </td>
+            <td style="padding-left: 6px; width: 50%;">
+              <a href="https://docs.google.com/spreadsheets/d/1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s/edit" target="_blank" style="display: block; text-align: center; background-color: #f1f5f9; color: #334155; padding: 10px 14px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 12px; border: 1px solid #cbd5e1;">
+                📊 Central Status Tracker
+              </a>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="background-color: #f1f5f9; padding: 12px 16px; border-radius: 6px; font-size: 13px; color: #475569;">
+        👉 <strong>Prochaine étape :</strong> L'équipe complète les 3 piliers (Challenge, Solution, Results) dans le Google Doc. Dès complétion ou à J-3, les agents généreront automatiquement la slide exécutive Google Slides et l'audit Sheets.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_antichamber_exclusion_page(client: str, lead_email: str, reason: Optional[str]) -> str:
+    """Renders confirmation page after mission exclusion."""
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Périmètre Exclu • {client}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+      margin: 0;
+      padding: 40px 15px;
+    }}
+    .container {{
+      max-width: 550px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      padding: 30px;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+      text-align: center;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="font-size: 40px; margin-bottom: 12px;">❌</div>
+    <h2 style="color: #0f172a; margin-top: 0;">Périmètre Exclu</h2>
+    <p style="color: #475569; font-size: 14px;">
+      Le périmètre de mission pour <strong>{client}</strong> a été marqué comme exclu par <strong>{lead_email}</strong>.
+    </p>
+    <div style="background: #f1f5f9; border-radius: 6px; padding: 10px 14px; margin: 18px 0; font-size: 13px; color: #334155; text-align: left;">
+      Motif : <em>{reason or 'Non renseigné'}</em>
+    </div>
+    <p style="font-size: 13px; color: #64748b;">
+      Le statut a été consigné dans le Central Pipeline Status Tracker. Aucun livrable ni email ne sera généré.
+    </p>
+    <a href="https://docs.google.com/spreadsheets/d/1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s/edit" target="_blank" style="display: inline-block; margin-top: 10px; color: #1a73e8; font-size: 13px; text-decoration: underline;">
+      Consulter le Central Tracker &rarr;
+    </a>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_antichamber_reassign_page(client: str, original_lead: str, new_lead: str) -> str:
+    """Renders confirmation page after reassignment."""
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Périmètre Réassigné • {client}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+      margin: 0;
+      padding: 40px 15px;
+    }}
+    .container {{
+      max-width: 550px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      padding: 30px;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+      text-align: center;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="font-size: 40px; margin-bottom: 12px;">🔄</div>
+    <h2 style="color: #0f172a; margin-top: 0;">Périmètre Réassigné</h2>
+    <p style="color: #475569; font-size: 14px;">
+      Le périmètre pour <strong>{client}</strong> a été transféré de <strong>{original_lead}</strong> à <strong>{new_lead}</strong>.
+    </p>
+    <p style="font-size: 13px; color: #64748b;">
+      Une notification d'Antichambre avec le lien de cadrage a été envoyée au nouveau lead.
+    </p>
+    <a href="https://docs.google.com/spreadsheets/d/1IDMXRrgiONxaxqB1N-ahRMoiHx4tqfB9vxhSxyhnH7s/edit" target="_blank" style="display: inline-block; margin-top: 10px; color: #1a73e8; font-size: 13px; text-decoration: underline;">
+      Consulter le Central Tracker &rarr;
+    </a>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.get("/antichamber", response_class=HTMLResponse)
+def api_get_antichamber(
+    request: Request,
+    client: Optional[str] = Query(None),
+    lead_email: Optional[str] = Query(None),
+    mission_ids: Optional[str] = Query(None)
+):
+    """
+    Renders the interactive Antichamber Web Portal for the detected lead.
+    Queries candidate missions from BigQuery matching client and/or lead_email.
+    """
+    clean_client = (client or "").strip()
+    clean_lead = (lead_email or "").strip()
+
+    candidate_missions = []
+    if clean_client:
+        candidate_missions = query_upcoming_missions(client_name=clean_client, days_ahead=None, limit=10)
+    if not candidate_missions and clean_lead:
+        candidate_missions = query_upcoming_missions(lead_email=clean_lead, days_ahead=None, limit=10)
+
+    # Fallback to realistic mock data if offline / no results
+    if not candidate_missions:
+        display_client = clean_client or "Crédit Agricole"
+        candidate_missions = [
+            m for m in MOCK_MISSIONS if display_client.lower() in m.get("client_name", "").lower()
+        ]
+        if not candidate_missions:
+            candidate_missions = [{
+                "mission_id": "ATF FR-09652",
+                "mission_name": f"CATS - CDP - Pilotage {display_client}",
+                "client_name": display_client,
+                "lead_email": clean_lead or "ayrton.andre@artefact.com",
+                "end_date": (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            }, {
+                "mission_id": "ATF FR-09616",
+                "mission_name": f"{display_client} - PMO Transverse",
+                "client_name": display_client,
+                "lead_email": clean_lead or "ayrton.andre@artefact.com",
+                "end_date": (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
+            }]
+
+    resolved_client = clean_client or candidate_missions[0].get("client_name", "Artefact")
+    resolved_lead = clean_lead or candidate_missions[0].get("lead_email", "ayrton.andre@artefact.com")
+
+    html_content = render_antichamber_page(
+        client=resolved_client,
+        lead_email=resolved_lead,
+        candidate_missions=candidate_missions
+    )
+    return HTMLResponse(content=html_content)
+
+
+@app.post("/antichamber/confirm", operation_id="confirm_antichamber")
+async def api_confirm_antichamber(request: Request):
+    """
+    Processes the Antichamber submission from the web portal form or JSON API.
+    Handles bundling multiple missions, designating a delegate (with lead in CC),
+    and kicking off Step 2 workspace generation.
+    """
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        data = await request.json()
+    else:
+        form = await request.form()
+        data = dict(form)
+        if hasattr(form, "getlist"):
+            data["selected_mission_ids"] = form.getlist("selected_mission_ids")
+
+    action = str(data.get("action", "confirm")).strip()
+    client = str(data.get("client", "Client")).strip()
+    lead_email = str(data.get("lead_email", "")).strip()
+    delegate_email = str(data.get("delegate_email", "")).strip()
+    custom_project_name = str(data.get("custom_project_name", "")).strip() or f"Mission {client}"
+    cc_emails_raw = str(data.get("cc_emails", "")).strip()
+    existing_folder_url = str(data.get("existing_folder_url", "")).strip()
+    reassign_email = str(data.get("reassign_email", "")).strip()
+    exclude_reason = str(data.get("exclude_reason", "")).strip()
+
+    raw_selected = data.get("selected_mission_ids", [])
+    if isinstance(raw_selected, str):
+        selected_ids = [s.strip() for s in raw_selected.split(",") if s.strip()]
+    elif isinstance(raw_selected, list):
+        selected_ids = [str(s).strip() for s in raw_selected if str(s).strip()]
+    else:
+        selected_ids = []
+
+    # Handle Exclusion
+    if action == "exclude":
+        try:
+            handle_log_pipeline_status(
+                mission_name=f"[{client}] {custom_project_name}",
+                status="ANTICHAMBER_EXCLUDED",
+                client=client,
+                lead_email=lead_email,
+                notes=f"Antichambre : périmètre exclu par {lead_email}. Motif : {exclude_reason or 'Hors champ'}"
+            )
+        except Exception as e:
+            print(f"[Tracker Error] Exclusion log: {e}")
+
+        if "application/json" in request.headers.get("accept", ""):
+            return {"status": "EXCLUDED", "client": client, "reason": exclude_reason}
+        return HTMLResponse(content=render_antichamber_exclusion_page(client, lead_email, exclude_reason))
+
+    # Handle Reassignment
+    if action == "reassign":
+        if reassign_email and "@" in reassign_email:
+            try:
+                base_url = str(request.base_url).rstrip("/")
+                from urllib.parse import quote_plus
+                portal_link = f"{base_url}/antichamber?client={quote_plus(client)}&lead_email={quote_plus(reassign_email)}"
+                missions = query_upcoming_missions(client_name=client, days_ahead=None, limit=5)
+                handle_send_antichamber_notification(
+                    lead_email=reassign_email,
+                    client=client,
+                    missions=missions,
+                    antichamber_url=portal_link
+                )
+                handle_log_pipeline_status(
+                    mission_name=f"[{client}] Antichambre Staging",
+                    status="ANTICHAMBER_REASSIGNED",
+                    client=client,
+                    lead_email=reassign_email,
+                    notes=f"Transféré de {lead_email} à {reassign_email}"
+                )
+            except Exception as e:
+                print(f"[Tracker Error] Reassign log/mail: {e}")
+
+        if "application/json" in request.headers.get("accept", ""):
+            return {"status": "REASSIGNED", "client": client, "newLeadEmail": reassign_email}
+        return HTMLResponse(content=render_antichamber_reassign_page(client, lead_email, reassign_email))
+
+    # Handle Confirmation & Launch
+    primary_lead = delegate_email if (delegate_email and "@" in delegate_email) else lead_email
+    cc_list: List[str] = []
+
+    # If delegated, lead_email is automatically placed in CC
+    if delegate_email and "@" in delegate_email and delegate_email.lower() != lead_email.lower():
+        cc_list.append(lead_email)
+
+    # Parse additional CC emails
+    if cc_emails_raw:
+        for em in cc_emails_raw.replace(";", ",").split(","):
+            cleaned = em.strip()
+            if "@" in cleaned and cleaned.lower() != primary_lead.lower() and cleaned not in cc_list:
+                cc_list.append(cleaned)
+
+    launch_notes = "Antichambre validée."
+    if selected_ids:
+        launch_notes += f" Missions regroupées: {', '.join(selected_ids)}."
+    if primary_lead != lead_email:
+        launch_notes += f" Rédacteur désigné: {primary_lead} (Lead {lead_email} en CC)."
+
+    try:
+        if existing_folder_url and existing_folder_url.strip():
+            base_url = str(request.base_url).rstrip("/")
+            launch_res = handle_prefill_debrief_doc(
+                folder_raw=existing_folder_url,
+                client=client,
+                lead_email=primary_lead,
+                mission_name=custom_project_name,
+                team_emails=cc_list,
+                base_service_url=base_url,
+                original_lead_email=lead_email if primary_lead != lead_email else None,
+                cc_emails=cc_list,
+                notes=launch_notes
+            )
+        else:
+            launch_res = handle_launch_mission(
+                mission_name=custom_project_name,
+                lead_email=primary_lead,
+                client=client,
+                folder_id=None,
+                original_lead_email=lead_email,
+                cc_emails=cc_list,
+                notes=launch_notes
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to launch mission from Antichamber: {e}")
+
+    if "application/json" in request.headers.get("accept", ""):
+        return launch_res
+
+    return HTMLResponse(content=render_antichamber_confirmation_page(
+        client=client,
+        project_name=custom_project_name,
+        primary_lead=primary_lead,
+        lead_email=lead_email,
+        cc_list=cc_list,
+        launch_res=launch_res,
+        selected_ids=selected_ids
+    ))
+
+
+@app.post("/antichamber/send-notification", operation_id="send_antichamber_notification")
+def api_send_antichamber_notification(req: SendAntichamberNotificationRequest, request: Request):
+    """Emails the Antichamber review link to the mission manager with candidate missions."""
+    try:
+        lead_email = req.get_lead_email()
+        client = req.client
+        missions = req.missions
+        if missions is None:
+            missions = query_upcoming_missions(client_name=client, days_ahead=None, limit=10)
+            if not missions:
+                missions = query_upcoming_missions(lead_email=lead_email, days_ahead=None, limit=10)
+
+        portal_url = req.get_antichamber_url()
+        if not portal_url:
+            base = str(request.base_url).rstrip("/")
+            from urllib.parse import quote_plus
+            portal_url = f"{base}/antichamber?client={quote_plus(client)}&lead_email={quote_plus(lead_email)}"
+
+        return handle_send_antichamber_notification(
+            lead_email=lead_email,
+            client=client,
+            missions=missions,
+            antichamber_url=portal_url,
+            cc_emails=req.get_cc_emails()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def render_debrief_validation_success_page(
+    client: str,
+    mission_name: str,
+    slide_url: str,
+    sheet_url: str,
+    folder_url: str,
+    doc_url: str,
+    slides_count: int = 4,
+    images_attached: int = 0
+) -> str:
+    """Renders validation confirmation page after debrief approval and autonomous wrap-up."""
+    img_notice = f" ({images_attached} visuels intégrés)" if images_attached > 0 else ""
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clôture validée • {client}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #1e293b;
+      margin: 0;
+      padding: 40px 15px;
+      line-height: 1.5;
+    }}
+    .container {{
+      max-width: 650px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+      overflow: hidden;
+    }}
+    .header {{
+      background-color: #0f172a;
+      color: #ffffff;
+      padding: 24px 28px;
+    }}
+    .badge {{
+      display: inline-block;
+      background-color: #16a34a;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }}
+    .header h1 {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }}
+    .header p {{
+      margin: 6px 0 0 0;
+      color: #94a3b8;
+      font-size: 13px;
+    }}
+    .content {{
+      padding: 28px;
+    }}
+    .btn {{
+      display: block;
+      text-align: center;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: opacity 0.2s;
+    }}
+    .btn-primary {{
+      background-color: #1a73e8;
+      color: #ffffff;
+    }}
+    .btn-dark {{
+      background-color: #0f172a;
+      color: #ffffff;
+    }}
+    .btn-secondary {{
+      background-color: #f1f5f9;
+      color: #1e293b;
+      border: 1px solid #cbd5e1;
+    }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="badge">Clôture Validée</div>
+      <h1>Débrief Approuvé</h1>
+      <p>Mission : <strong>{mission_name}</strong> &bull; Client : <strong>{client}</strong></p>
+    </div>
+
+    <div class="content">
+      <p style="font-size: 15px; margin-top: 0;">
+        Le débrief a été validé. La synthèse multi-persona et la checklist d'audit ont été générées dans votre dossier Google Drive.
+      </p>
+
+      <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 18px; margin: 20px 0;">
+        <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 14px;">Livrables générés :</h4>
+        <table style="width: 100%; border-collapse: separate; border-spacing: 0 8px;">
+          <tr>
+            <td style="padding-right: 6px; width: 50%;">
+              <a href="{slide_url}" target="_blank" class="btn btn-primary">📊 Deck Google Slides ({slides_count} slides{img_notice}) &rarr;</a>
+            </td>
+            <td style="padding-left: 6px; width: 50%;">
+              <a href="{sheet_url}" target="_blank" class="btn btn-dark">🛡️ Checklist Audit Google Sheets &rarr;</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding-right: 6px; width: 50%;">
+              <a href="{folder_url}" target="_blank" class="btn btn-secondary">📁 Dossier Drive de la Mission &rarr;</a>
+            </td>
+            <td style="padding-left: 6px; width: 50%;">
+              <a href="{doc_url}" target="_blank" class="btn btn-secondary">📄 Document de Débrief Validé &rarr;</a>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="background-color: #f1f5f9; padding: 12px 16px; border-radius: 6px; font-size: 13px; color: #475569;">
+        L'email de notification finale a été envoyé avec l'ensemble des liens vers vos livrables. Le statut a été mis à jour dans le Central Pipeline Status Tracker (MISSION_WRAPPED_UP).
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.get("/debrief/validate", operation_id="validate_debrief_get")
+async def api_validate_debrief_get(
+    request: Request,
+    folder_id: str = Query(..., description="Mission folder ID or URL"),
+    doc_id: Optional[str] = Query(None, description="Debrief document ID"),
+    client: Optional[str] = Query(None, description="Client name"),
+    lead_email: Optional[str] = Query(None, description="Lead consultant email"),
+    mission_name: Optional[str] = Query(None, description="Mission name")
+):
+    """
+    1-Click Validation endpoint triggered from email CTA or Google Doc link.
+    Autonomously executes wrapup pipeline: Slides generation (4 personae), Audit sheet,
+    Central Tracker update (MISSION_WRAPPED_UP), and notification email.
+    """
+    try:
+        wrapup_res = handle_wrapup_mission(
+            folder_raw=folder_id,
+            mission_name=mission_name,
+            client=client,
+            lead_email=lead_email,
+            doc_id=doc_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Échec de la clôture de mission : {e}")
+
+    accept = request.headers.get("accept", "")
+    if "application/json" in accept:
+        return wrapup_res
+
+    return HTMLResponse(content=render_debrief_validation_success_page(
+        client=wrapup_res.get("client", client or "Client"),
+        mission_name=wrapup_res.get("missionName", mission_name or "Mission"),
+        slide_url=wrapup_res.get("slideUrl", ""),
+        sheet_url=wrapup_res.get("sheetUrl", ""),
+        folder_url=wrapup_res.get("folderUrl", ""),
+        doc_url=wrapup_res.get("docUrl", ""),
+        slides_count=wrapup_res.get("slidesCount", 4),
+        images_attached=wrapup_res.get("imagesAttached", 0)
+    ))
+
+
+@app.post("/debrief/validate", operation_id="validate_debrief_post")
+def api_validate_debrief_post(req: ValidateDebriefRequest):
+    """
+    API endpoint to trigger autonomous wrap-up after consultant debrief review.
+    """
+    try:
+        return handle_wrapup_mission(
+            folder_raw=req.get_folder_id(),
+            mission_name=req.get_mission_name(),
+            client=req.client,
+            lead_email=req.get_lead_email(),
+            doc_id=req.get_doc_id(),
+            cc_emails=req.get_cc_emails()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/debrief/prefill", operation_id="prefill_debrief_doc")
+def api_prefill_debrief_doc(req: PrefillDebriefRequest, request: Request):
+    """
+    API endpoint to analyze Drive folder, detect visuals, synthesize Challenge/Solution/Results,
+    and create or update the Google Doc with an AI-prefilled debrief and validation CTA.
+    """
+    try:
+        base_service_url = str(request.base_url).rstrip("/")
+        return handle_prefill_debrief_doc(
+            folder_raw=req.get_folder_id(),
+            client=req.client,
+            lead_email=req.get_lead_email(),
+            mission_name=req.get_mission_name(),
+            team_emails=req.get_team_emails(),
+            deadline_date=req.get_deadline_date(),
+            industry=req.industry,
+            base_service_url=base_service_url,
+            prefilled_payload=req.get_prefilled_payload(),
+            original_lead_email=req.get_original_lead_email(),
+            cc_emails=req.get_cc_emails(),
+            notes=req.notes
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/mission/wrapup", operation_id="wrapup_mission")
+def api_wrapup_mission(req: WrapupMissionRequest):
+    """
+    API endpoint to autonomously execute the full end-of-mission wrapup pipeline:
+    4-persona Slides, Audit Sheet, Tracker update, and final delivery email.
+    """
+    try:
+        return handle_wrapup_mission(
+            folder_raw=req.get_folder_id(),
+            mission_name=req.get_mission_name(),
+            client=req.client,
+            lead_email=req.get_lead_email(),
+            doc_id=req.get_doc_id(),
+            persona_cards=req.get_persona_cards(),
+            persona_images=req.get_persona_images(),
+            audit_records=req.get_audit_records(),
+            industry=req.industry,
+            cc_emails=req.get_cc_emails()
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

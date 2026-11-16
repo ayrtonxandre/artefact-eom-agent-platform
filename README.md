@@ -34,8 +34,8 @@ An enterprise multi-agent pipeline built with **Google Agent Development Kit (AD
   Emulates an Information Security and Knowledge Management auditor. Audits all mission deliverables for confidentiality risk (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), suggests tags, and determines internal "Know" export eligibility.
 
 ### 2. Workspace Tools
-* **`extract_folder_documents`**: Reads text documents, Google Docs, presentations, and code files from a Google Drive folder.
-* **`generate_one_pager_slide`**: Clones the Artefact Master Template (`197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ`) into the mission folder and replaces placeholders (`{{CONTEXT}}`, `{{DELIVERABLES}}`, `{{BUSINESS_IMPACT}}`, `{{RECOMMENDATIONS}}`, `{{SYNTHESIS}}`).
+* **`extract_folder_documents`**: Recursively scans the mission Google Drive folder (including `01_Visuals & Diagrams`), extracts text from Google Docs, Slides, Sheets, PDFs (via `pypdf`), and code/text files. Automatically parses URLs referencing external project deliverables folders (e.g. from Debrief Doc Section 5) to ingest client presentations, specs, and audits into the shared multi-agent context.
+* **`generate_one_pager_slide`**: Clones the official Artefact 2025 Master Template (`1DH-zXzB9CmaYB-p0CyXJDR-gdeJ6gSvylM-76IPfkEY`) into the mission folder and replaces placeholders (`{{MISSION_TITLE}}`, `{{INDUSTRY_TAG}}`, `{{TOPIC_TAG}}`, `{{CLIENT_TAG}}`, `{{TECH_TAG}}`, `{{DURATION_TAG}}`, `{{DISPOSITIF_TAG}}`, `{{CARD_4_HEADER}}`, `{{CONTEXT}}`, `{{DELIVERABLES}}`, `{{BUSINESS_IMPACT}}`, `{{RECOMMENDATIONS}}`).
 * **`create_audit_sheet`**: Generates an interactive Google Sheet with formatted headers, auto-resized columns, and validation checkboxes for team review.
 * **`send_lead_notification`**: Dispatches an email to the mission lead via Gmail API with links to the generated deck and sheet.
 

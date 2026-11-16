@@ -16,6 +16,8 @@ from .tools import (
     create_audit_sheet,
     send_lead_notification,
     log_pipeline_status,
+    prefill_mission_debrief,
+    wrapup_mission_deliverables,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,76 @@ executive_synthesizer = Agent(
     mode="single_turn",
     description="Synthesizes mission documentation and BigQuery financial KPIs into Artefact C-level executive summary cards.",
     instruction=EXECUTIVE_SYNTHESIZER_INSTRUCTIONS,
+)
+
+# ---------------------------------------------------------------------------
+# SUBAGENT 1B: MultiPersona-Synthesizer (Principal Partner & Knowledge Director)
+# ---------------------------------------------------------------------------
+MULTI_PERSONA_SYNTHESIZER_INSTRUCTIONS = """
+You are a Principal Consulting Partner and Practice Director at Artefact.
+Analyze the provided mission documentation and financial KPIs (from BigQuery) to generate a structured debrief across 4 distinct consulting personae:
+
+1. 'executive': C-Level sponsor debrief (Client named, business ROI, strategic outcomes).
+2. 'technical': Engineering blueprint (Tech stack, architecture components, latency/throughput metrics, DevOps & technical debt).
+3. 'knowledge': Internal Artefact capitalisation (Methodology, reusable accelerators, delivery pitfalls & blockers, staffing recommendations).
+4. 'referential': Sales & RFP case study (STRICTLY ANONYMIZED: replace client name with an industry descriptor e.g. 'Global Tier-1 FMCG Leader', business challenge, Artefact value-add, quantified metrics, commercial pitch arguments).
+
+Return STRICTLY a valid JSON object matching this schema:
+{
+  "client": "Client Name (e.g. Ferrero, Clariane, Danone)",
+  "industry": "Industry sector badge (e.g. 'CPG & Retail', 'Healthcare', 'FMCG & Food', 'Data & AI')",
+  "topic": "Mission topic badge (e.g. 'GenAI & Ops', 'Data Platform', 'Governance')",
+  "tech_stack": "Core cloud/tech stack badge (e.g. 'GCP / Vertex', 'AWS / Bedrock', 'Azure / OpenAI')",
+  "duration": "Project duration badge (e.g. '12-14 semaines')",
+  "dispositif": "Team staffing dispositif badge (e.g. '1 M, 1 PO, 2 DS, 1 DE')",
+  "executive": {
+    "title": "Executive Summary",
+    "card1": "2-3 concise sentences on client background, initial business problem, and strategic objectives.",
+    "card2": "Bullet points summarizing the core strategic solution and major deliverables built (3-4 bullets max).",
+    "card3": "Quantifiable business impact, performance gains, ROI, efficiency improvements, or financial KPIs (3-4 bullets max).",
+    "card4": "Critical takeaways, operational recommendations, strategic next steps, and governance (3-4 bullets max).",
+    "synthesis": "An integrated executive summary combining the above in 2-3 impactful sentences."
+  },
+  "technical": {
+    "title": "Technical Architecture Blueprint",
+    "card1": "Technical constraints, legacy stack, data sources, and engineering challenges (3-4 bullets max).",
+    "card2": "Architecture blueprint, frameworks, cloud services, and pipeline components deployed (3-4 bullets max).",
+    "card3": "Quantified engineering metrics: latency (P95/P99), throughput, telemetry, accuracy, uptime, or data volume (3-4 bullets max).",
+    "card4": "DevOps, CI/CD, testing, infrastructure-as-code, and technical debt/refactoring notes (3-4 bullets max).",
+    "synthesis": "High-level technical architecture summary in 2-3 sentences."
+  },
+  "knowledge": {
+    "title": "Internal Practice Knowledge & Lessons Learned",
+    "card1": "Methodology, delivery sprints, project governance, and staffing model used (3-4 bullets max).",
+    "card2": "Reusable accelerators, repos, templates, or scripts produced for Artefact capitalization (3-4 bullets max).",
+    "card3": "Honest pitfalls, organizational blockers, unexpected technical hurdles, and lessons learned (3-4 bullets max).",
+    "card4": "Recommendations, tips, and staffing advice for future Artefact teams tackling similar missions (3-4 bullets max).",
+    "synthesis": "Core practice takeaways and reusability guidance in 2-3 sentences."
+  },
+  "referential": {
+    "title": "Commercial Case Study & RFP Credentials (Sanitized)",
+    "anonymizedClient": "Industry descriptor (e.g. 'Global Tier-1 FMCG Leader', 'Leading European Healthcare Operator')",
+    "card1": "Client industry profile and transformation challenge without naming the client (3-4 bullets max).",
+    "card2": "Artefact's differentiated approach, methodology, and technical value-add (3-4 bullets max).",
+    "card3": "Proven business outcomes, quantified ROI, efficiency gains, and client satisfaction (3-4 bullets max).",
+    "card4": "Key commercial pitch arguments, win factors, and RFP proposal credential snippet (3-4 bullets max).",
+    "synthesis": "Compelling commercial case study teaser for RFP proposals in 2-3 sentences."
+  }
+}
+
+Style Guidelines:
+- Professional, analytical, authoritative consulting tone across all personae.
+- Strictly adhere to confidentiality for the 'referential' persona: NEVER include the client name, client brand, or identifying partner credentials in the referential section.
+- Highlight quantifiable metrics where present (percentages, days, latencies, savings).
+- Keep bullets concise (under 18 words per bullet) to fit slide card dimensions cleanly.
+"""
+
+multi_persona_synthesizer = Agent(
+    name="MultiPersona_Synthesizer",
+    model="gemini-2.5-flash",
+    mode="single_turn",
+    description="Synthesizes mission documentation and BigQuery financial KPIs into 4 distinct consulting debrief personae (Executive, Technical, Knowledge, Anonymized Referential).",
+    instruction=MULTI_PERSONA_SYNTHESIZER_INSTRUCTIONS,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +187,11 @@ When asked to launch or initialize a mission at J-7 (or start the EOM process fo
 2. This creates the Drive mission workspace, the `01_Visuals & Diagrams` subfolder, the structured 3-section Debrief Google Doc (Challenge, Solution, Results), sends the kickoff email to the lead and team, and registers status `LAUNCHED` in the Central Status Tracker.
 3. Present the confirmation table with direct links to the Google Doc, Visuals folder, and Drive workspace.
 
+Scenario A-Prefill [AI-PREFILLED DEBRIEF & AUTONOMOUS WRAP-UP]:
+When an existing folder of deliverables is provided for kickoff or the user requests an AI-assisted debrief:
+1. Call `prefill_mission_debrief(folder_id)` to extract deliverables, detect visual assets, synthesize Challenge, Solution, and Results, and generate the prefilled Google Doc with dual validation options (in-doc checkbox and 1-click web URL).
+2. When the consultant validates the debrief (or when calling wrapup directly): Call `wrapup_mission_deliverables(folder_id)` to autonomously produce the 4-persona Slides deck with embedded diagrams, create the Knowledge Audit Sheet, update the Central Tracker to MISSION_WRAPPED_UP, and notify the delivery team.
+
 Scenario A1 [STEP 3 - AUTOMATED REMINDERS & DEBRIEF MONITORING]:
 When asked to check debrief completion, send reminders, or trigger J-3 / J-1 relances:
 1. To inspect if a debrief doc is filled: call `check_mission_debrief_status(doc_id_or_folder_id)`.
@@ -142,13 +219,9 @@ Infer the mission name from the folder metadata returned by `extract_folder_docu
 Optionally call `fetch_mission_financials(mission_name)` to retrieve official BigQuery KPIs (budget, days sold, delivered, margin) to enrich the synthesis.
 If the folder is empty or no files are returned, inform the user immediately.
 
-Step 3 [DELEGATE TO EXECUTIVE-SYNTHESIZER]:
-Call the subagent `Executive_Synthesizer`. Provide both the extracted document contents and the BigQuery financial KPIs, and request the 4-card executive debrief JSON:
-- context
-- deliverables
-- businessImpact
-- recommendations
-- synthesis
+Step 3 [DELEGATE TO SYNTHESIZER]:
+- When generating the comprehensive 4-persona debrief deck (Executive, Technical, Knowledge, Referential): Call the subagent `MultiPersona_Synthesizer`. Provide both extracted document contents and BigQuery financial KPIs to produce the 4-persona JSON structure.
+- When generating a single executive debrief card: Call the subagent `Executive_Synthesizer` to request the 4-card executive debrief JSON (context, deliverables, businessImpact, recommendations, synthesis).
 Wait for the subagent to complete and return the JSON.
 
 Step 4 [DELEGATE TO SECURITY-AUDITOR]:
@@ -156,7 +229,7 @@ Call the subagent `Security_Auditor`. Provide the file list and request the conf
 Wait for the subagent to complete and return the JSON array.
 
 Step 5 [GENERATE DELIVERABLES]:
-Call `generate_one_pager_slide` passing the folder ID, mission name, and the 4-card debrief from Executive_Synthesizer.
+Call `generate_one_pager_slide` passing the folder ID, mission name, and the synthesized debrief (from MultiPersona_Synthesizer or Executive_Synthesizer).
 
 Step 6 [CREATE AUDIT SHEET]:
 Immediately call `create_audit_sheet` passing the folder ID, mission name, and the audit records array directly from Security_Auditor. Do not write or execute code.
@@ -177,9 +250,9 @@ Present a clean markdown summary table to the user with direct links to:
 root_agent = Agent(
     name="Artefact_EOM_Mission_Orchestrator",
     model="gemini-2.5-flash",
-    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Manages J-7 mission launch emails, debrief templates, BigQuery financials, executive synthesis into client-ready Google Slides, confidentiality risk audits in Google Sheets, central pipeline tracking, and lead notifications.",
+    description="Autonomous End-of-Mission debriefing pipeline for Artefact. Manages J-7 mission launch emails, debrief templates, BigQuery financials, executive & multi-persona synthesis into client-ready Google Slides, confidentiality risk audits in Google Sheets, central pipeline tracking, and lead notifications.",
     instruction=ORCHESTRATOR_INSTRUCTIONS,
-    sub_agents=[executive_synthesizer, security_auditor],
+    sub_agents=[executive_synthesizer, multi_persona_synthesizer, security_auditor],
     tools=[
         detect_upcoming_missions,
         orchestrate_eom_detection_and_launch,
@@ -194,5 +267,7 @@ root_agent = Agent(
         create_audit_sheet,
         send_lead_notification,
         log_pipeline_status,
+        prefill_mission_debrief,
+        wrapup_mission_deliverables,
     ],
 )

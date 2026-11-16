@@ -15,7 +15,10 @@ from .workspace_service import (
     handle_generate_slide,
     handle_create_audit_sheet,
     handle_send_notification,
-    handle_log_pipeline_status
+    handle_log_pipeline_status,
+    handle_send_antichamber_notification,
+    handle_prefill_debrief_doc,
+    handle_wrapup_mission
 )
 from .bigquery_service import (
     query_ended_missions,
@@ -29,18 +32,21 @@ def detect_upcoming_missions(
     target_date: Optional[str] = None,
     client_name: Optional[str] = None,
     lead_email: Optional[str] = None,
-    limit: int = 50
+    limit: int = 50,
+    exact_date: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Step 1 in Artefact Target EOM Process: Queries BigQuery (mart_ext_eom_chat_missions)
-    to detect active client missions ending at J-7 (or on a target_date).
+    to detect active client missions ending within the upcoming window (or strictly on target_date / J+7).
     
     Args:
-        days_ahead: Number of days ahead to scan (default 7 for J-7 kickoff).
+        days_ahead: Number of days ahead to scan (default 7 for J-7 kickoff window).
         target_date: Optional specific end date formatted as 'YYYY-MM-DD'.
         client_name: Optional substring filter for client name (e.g. 'Crédit Agricole', 'Clariane').
         lead_email: Optional filter for a specific mission lead email.
         limit: Max number of records to retrieve (default 50).
+        exact_date: If True, matches strictly end_date = CURRENT_DATE() + days_ahead.
+                    If False (default), queries window BETWEEN CURRENT_DATE() AND CURRENT_DATE() + days_ahead.
         
     Returns:
         A list of mission records containing mission_id, mission_name, client_name, industry, lead_email, and end_date.
@@ -50,7 +56,8 @@ def detect_upcoming_missions(
         target_date=target_date,
         client_name=client_name,
         lead_email=lead_email,
-        limit=limit
+        limit=limit,
+        exact_date=exact_date
     )
 
 
@@ -61,11 +68,12 @@ def orchestrate_eom_detection_and_launch(
     auto_launch: bool = True,
     dry_run: bool = False,
     override_lead_email: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    exact_date: bool = False
 ) -> Dict[str, Any]:
     """
     Autonomous Pipeline Orchestrator: Chains Step 1 (BigQuery Detection) into Step 2 (Kickoff Launch).
-    Scans BigQuery for missions ending at J-7, checks the Central Status Tracker for existing entries,
+    Scans BigQuery for missions ending within the J-7 horizon window, checks the Central Status Tracker for existing entries,
     and automatically launches new missions (creating Drive folders, debrief doc, sending kickoff email, and logging status).
     
     Args:
@@ -76,6 +84,8 @@ def orchestrate_eom_detection_and_launch(
         dry_run: If True, simulates launch without creating Google Drive files or sending emails.
         override_lead_email: Optional email to redirect kickoff notifications during testing (e.g. user email).
         limit: Max number of missions to process in one execution run.
+        exact_date: If True, matches strictly end_date = CURRENT_DATE() + days_ahead.
+                    If False (default), queries window BETWEEN CURRENT_DATE() AND CURRENT_DATE() + days_ahead.
         
     Returns:
         Summary dict containing detection criteria, total detected, launched count, skipped count, and mission details.
@@ -87,7 +97,8 @@ def orchestrate_eom_detection_and_launch(
         auto_launch=auto_launch,
         dry_run=dry_run,
         override_lead_email=override_lead_email,
-        limit=limit
+        limit=limit,
+        exact_date=exact_date
     )
 
 
@@ -116,6 +127,37 @@ def fetch_mission_financials(mission_name: str) -> Dict[str, Any]:
     """
     return query_mission_financials(mission_name) or {}
 
+def send_antichamber_notification(
+    lead_email: str,
+    client: str,
+    missions: List[Dict[str, Any]],
+    antichamber_url: str,
+    cc_emails: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Step 1 Pre-Kickoff (Antichambre): Sends the Antichamber review email to the detected lead.
+    Enables the lead to confirm ownership, bundle multiple missions for the same client,
+    rename the project, or designate a delegate (putting the lead in CC).
+    
+    Args:
+        lead_email: Email of the detected mission manager/lead.
+        client: Client company name (e.g. 'Crédit Agricole').
+        missions: List of candidate missions detected for this client/lead.
+        antichamber_url: Web portal URL for the interactive review form.
+        cc_emails: Optional list of email addresses to keep in CC.
+        
+    Returns:
+        Dict with status, leadEmail, client, and antichamberUrl.
+    """
+    return handle_send_antichamber_notification(
+        lead_email=lead_email,
+        client=client,
+        missions=missions,
+        antichamber_url=antichamber_url,
+        cc_emails=cc_emails
+    )
+
+
 def launch_mission_kickoff(
     mission_name: str,
     lead_email: str,
@@ -125,22 +167,27 @@ def launch_mission_kickoff(
     parent_folder_id: Optional[str] = None,
     deadline_date: Optional[str] = None,
     industry: Optional[str] = None,
+    original_lead_email: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Step 2 in Artefact Target EOM Process: Initializes mission workspace and dispatches kickoff email.
     Creates or locates the mission workspace folder, initializes the structured 3-section Debrief Google Doc
     (Challenge, Solution, Results), creates the Visuals subfolder, sends the launch email to the mission manager
     and team, and records status LAUNCHED in the Central Status Tracker.
+    If original_lead_email is specified, lead_email is treated as delegate and original_lead_email is placed in CC.
     
     Args:
         mission_name: Name of the mission (e.g. Clariane, TotalEnergies).
-        lead_email: Email address of the mission delivery manager.
+        lead_email: Email address of the mission delivery manager or delegate.
         client: Client company name.
         team_emails: List of project team member email addresses (informed / CC).
         folder_id: Optional existing Google Drive mission folder ID.
         parent_folder_id: Optional parent container ID in which to create the mission workspace folder.
         deadline_date: Optional target completion date string (e.g. '28/10/2026'). Defaults to J-7.
         industry: Optional client industry sector (e.g. 'Bank', 'Pharma', 'Luxury & Beauty').
+        original_lead_email: Optional original manager email when delegated (automatically placed in CC).
+        cc_emails: Optional list of additional CC emails.
         
     Returns:
         A dictionary with status, folderId, folderUrl, docId, docUrl, visualsFolderUrl, and emailStatus.
@@ -154,6 +201,8 @@ def launch_mission_kickoff(
         parent_folder_id=parent_folder_id,
         deadline_date=deadline_date,
         industry=industry,
+        original_lead_email=original_lead_email,
+        cc_emails=cc_emails
     )
 
 
@@ -268,16 +317,21 @@ def generate_one_pager_slide(
     folder_id: str,
     mission_name: str,
     card_data: Any,
-    template_id: Optional[str] = "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
+    template_id: Optional[str] = "1DH-zXzB9CmaYB-p0CyXJDR-gdeJ6gSvylM-76IPfkEY",
+    personae: Optional[List[str]] = None,
+    client: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Clones the Artefact Master Slide Template and populates the 4 executive debrief cards.
+    Clones the Artefact Master Slide Template and populates debrief cards.
+    Supports either single executive card or 4-persona debrief deck (Executive, Technical, Knowledge, Referential).
     
     Args:
         folder_id: Google Drive Folder ID where the generated slide should be stored.
-        mission_name: Name of the mission (e.g., Clariane, TotalEnergies).
-        card_data: 4-card executive content dict or JSON (context, deliverables, businessImpact, recommendations, synthesis).
+        mission_name: Name of the mission (e.g., Clariane, TotalEnergies, Ferrero).
+        card_data: 4-card executive content dict/JSON or multi-persona dict (executive, technical, knowledge, referential).
         template_id: Google Slides Master Template ID.
+        personae: Optional list of personae to generate (e.g. ['executive', 'technical', 'knowledge', 'referential']).
+        client: Optional client name for referential sanitization.
         
     Returns:
         A dictionary with presentationId, presentationUrl, and title.
@@ -286,7 +340,9 @@ def generate_one_pager_slide(
         folder_raw=folder_id,
         mission_name=mission_name,
         card=card_data,
-        template_id=template_id
+        template_id=template_id,
+        personae=personae,
+        client=client
     )
 
 
@@ -317,7 +373,11 @@ def send_lead_notification(
     recipient_email: str,
     mission_name: str,
     slide_url: str,
-    sheet_url: str
+    sheet_url: str,
+    client: Optional[str] = None,
+    folder_url: Optional[str] = None,
+    force_recipient: bool = False,
+    cc_emails: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Dispatches a completion notification email to the mission lead with links to generated artifacts.
@@ -327,15 +387,23 @@ def send_lead_notification(
         mission_name: Name of the mission.
         slide_url: URL to the generated Google Slides executive deck.
         sheet_url: URL to the generated Google Sheets checklist.
+        client: Optional client name.
+        folder_url: Optional Google Drive mission folder URL.
+        force_recipient: If True, skips test exemption redirection and dispatches strictly to recipient_email.
+        cc_emails: Optional list or comma-separated string of emails to CC.
         
     Returns:
-        A dictionary with status, recipientEmail, and missionName.
+        A dictionary with status, recipientEmail, ccEmails, and missionName.
     """
     return handle_send_notification(
         recipient_email=recipient_email,
         mission_name=mission_name,
         slide_url=slide_url,
-        sheet_url=sheet_url
+        sheet_url=sheet_url,
+        client=client,
+        folder_url=folder_url,
+        force_recipient=force_recipient,
+        cc_emails=cc_emails
     )
 
 
@@ -377,4 +445,107 @@ def log_pipeline_status(
         folder_url=folder_url,
         risk=risk,
         notes=notes,
+    )
+
+
+def prefill_mission_debrief(
+    folder_id: str,
+    client: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    mission_name: Optional[str] = None,
+    team_emails: Optional[Any] = None,
+    deadline_date: Optional[str] = None,
+    industry: Optional[str] = None,
+    base_service_url: Optional[str] = None,
+    prefilled_payload: Optional[Dict[str, Any]] = None,
+    original_lead_email: Optional[str] = None,
+    cc_emails: Optional[Any] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Step 2B in Target EOM Process: Inspects existing Drive folder documents, detects visual deliverables
+    and architecture diagrams, synthesizes 3 debrief pillars (Challenge, Solution, Results) along with
+    a 4-Persona preview, and populates an AI-prefilled Google Doc with dual validation options (in-doc and 1-click web).
+    
+    Args:
+        folder_id: Google Drive folder ID or URL containing existing project documentation.
+        client: Client company name.
+        lead_email: Delivery lead email.
+        mission_name: Mission title.
+        team_emails: List or comma-separated string of team emails.
+        deadline_date: End of mission debrief deadline (YYYY-MM-DD).
+        industry: Industry sector.
+        base_service_url: Base HTTP URL of the FastAPI service for 1-click validation links.
+        prefilled_payload: Optional override for Challenge, Solution, and Results content.
+        original_lead_email: Original manager email if delegated.
+        cc_emails: Optional list or comma-separated string of CC emails.
+        notes: Contextual notes for Central Tracker logging.
+        
+    Returns:
+        A dictionary with status (DEBRIEF_PREFILLED_AWAITING_CHECK), docId, docUrl, validationUrl,
+        detectedVisuals, prefilledData, and emailStatus.
+    """
+    return handle_prefill_debrief_doc(
+        folder_raw=folder_id,
+        client=client,
+        lead_email=lead_email,
+        mission_name=mission_name,
+        team_emails=team_emails,
+        deadline_date=deadline_date,
+        industry=industry,
+        base_service_url=base_service_url,
+        prefilled_payload=prefilled_payload,
+        original_lead_email=original_lead_email,
+        cc_emails=cc_emails,
+        notes=notes
+    )
+
+
+def wrapup_mission_deliverables(
+    folder_id: str,
+    mission_name: Optional[str] = None,
+    client: Optional[str] = None,
+    lead_email: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    persona_cards: Optional[Dict[str, Any]] = None,
+    persona_images: Optional[Dict[str, Any]] = None,
+    audit_records: Optional[List[Dict[str, Any]]] = None,
+    industry: Optional[str] = None,
+    cc_emails: Optional[Any] = None
+) -> Dict[str, Any]:
+    """
+    Step 5-7 Autonomous Wrap-Up: When consultant validates the debrief (via checkbox or 1-click web CTA),
+    autonomously triggers:
+    1. Multi-Persona Google Slides deck generation (Executive, Tech, Know, Referential) with embedded visuals.
+    2. Interactive Knowledge & Compliance Audit Google Sheet creation.
+    3. Milestone update in Central Status Tracker to MISSION_WRAPPED_UP.
+    4. Delivery notification email with all 4 asset links (Drive, Doc, Slides, Sheet).
+    
+    Args:
+        folder_id: Google Drive folder ID or URL.
+        mission_name: Mission title.
+        client: Client company name.
+        lead_email: Delivery lead email.
+        doc_id: Optional Google Doc ID of the validated debrief.
+        persona_cards: Optional custom persona card contents.
+        persona_images: Optional image mappings per slide persona.
+        audit_records: Optional custom security audit records.
+        industry: Industry sector.
+        cc_emails: Optional list or comma-separated string of CC emails.
+        
+    Returns:
+        A dictionary with status (MISSION_WRAPPED_UP), slideUrl, sheetUrl, docUrl, folderUrl,
+        slidesCount, imagesAttached, auditRowsCount, and emailStatus.
+    """
+    return handle_wrapup_mission(
+        folder_raw=folder_id,
+        mission_name=mission_name,
+        client=client,
+        lead_email=lead_email,
+        doc_id=doc_id,
+        persona_cards=persona_cards,
+        persona_images=persona_images,
+        audit_records=audit_records,
+        industry=industry,
+        cc_emails=cc_emails
     )

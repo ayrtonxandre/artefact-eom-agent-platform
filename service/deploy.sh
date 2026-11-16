@@ -24,6 +24,11 @@ else
   echo "⚠️  drive_token.json not found in parent directory. Cloud Run will use default Service Account credentials."
 fi
 
+# Ensure eom_agent module is packaged with the service
+echo "📦 Packaging eom_agent module into service container context..."
+rm -rf "$SCRIPT_DIR/eom_agent"
+cp -r "$SCRIPT_DIR/../eom_agent" "$SCRIPT_DIR/eom_agent"
+
 gcloud run deploy "$SERVICE_NAME" \
   --project "$PROJECT_ID" \
   --region "$REGION" \

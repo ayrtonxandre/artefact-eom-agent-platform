@@ -76,7 +76,8 @@ def query_upcoming_missions(
     lead_email: Optional[str] = None,
     exclude_internal: bool = True,
     limit: int = 100,
-    force_mock: bool = False
+    force_mock: bool = False,
+    exact_date: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Step 1 Core: Executes parameterized SQL query against mart_ext_eom_chat_missions
@@ -92,6 +93,8 @@ def query_upcoming_missions(
         exclude_internal: If True, filters out non-client activities (ARTEFACT internal, chapters, timesheets).
         limit: Max number of records to return.
         force_mock: If True, returns mock data without querying BigQuery.
+        exact_date: If True, matches strictly end_date = CURRENT_DATE() + days_ahead.
+                    If False (default), queries window BETWEEN CURRENT_DATE() AND CURRENT_DATE() + days_ahead.
 
     Returns:
         List of detected mission records with metadata, client, lead, and end_date.
@@ -112,7 +115,13 @@ def query_upcoming_missions(
         parameters.append(bigquery.ScalarQueryParameter("date_start", "DATE", date_start))
         parameters.append(bigquery.ScalarQueryParameter("date_end", "DATE", date_end))
     elif days_ahead is not None:
-        conditions.append("end_date = DATE_ADD(CURRENT_DATE(), INTERVAL @days_ahead DAY)")
+        if exact_date:
+            conditions.append("end_date = DATE_ADD(CURRENT_DATE(), INTERVAL @days_ahead DAY)")
+        else:
+            if days_ahead >= 0:
+                conditions.append("end_date BETWEEN CURRENT_DATE() AND DATE_ADD(CURRENT_DATE(), INTERVAL @days_ahead DAY)")
+            else:
+                conditions.append("end_date BETWEEN DATE_ADD(CURRENT_DATE(), INTERVAL @days_ahead DAY) AND CURRENT_DATE()")
         parameters.append(bigquery.ScalarQueryParameter("days_ahead", "INT64", days_ahead))
 
     # Basic data cleanliness filters
@@ -255,13 +264,14 @@ def detect_and_launch_upcoming_missions(
     parent_folder_id: Optional[str] = None,
     tracker_id: Optional[str] = None,
     limit: int = 10,
-    force_mock: bool = False
+    force_mock: bool = False,
+    exact_date: bool = False
 ) -> Dict[str, Any]:
     """
     Automated End-to-End Orchestrator: Step 1 (Detection) -> Step 2 (Kickoff Launch).
     
     Workflow:
-    1. Queries BigQuery mart_ext_eom_chat_missions for missions ending at J-7 (or target_date / range).
+    1. Queries BigQuery mart_ext_eom_chat_missions for missions ending at J-7 (or target_date / range / window).
     2. Reads the Central Pipeline Status Tracker spreadsheet to identify existing missions.
     3. For any mission not yet launched:
        - If dry_run is True: simulates and previews the action.
@@ -278,7 +288,8 @@ def detect_and_launch_upcoming_missions(
         get_sheets_service,
         get_credentials,
         CENTRAL_TRACKER_TAB,
-        DEFAULT_TRACKER_ID
+        DEFAULT_TRACKER_ID,
+        is_dispatch_security_exempt
     )
 
     target_tracker_id = tracker_id or os.environ.get("CENTRAL_TRACKER_ID", DEFAULT_TRACKER_ID)
@@ -291,7 +302,8 @@ def detect_and_launch_upcoming_missions(
         date_end=date_end,
         client_name=client_name,
         limit=limit,
-        force_mock=force_mock
+        force_mock=force_mock,
+        exact_date=exact_date
     )
 
     # 2. Fetch existing missions from Central Status Tracker
@@ -380,11 +392,13 @@ def detect_and_launch_upcoming_missions(
             continue
 
         if auto_launch:
-            recipient_lead = override_lead_email or m_lead
+            is_exempt = is_dispatch_security_exempt(m_name) or is_dispatch_security_exempt(m_id)
+            effective_override = None if is_exempt else override_lead_email
+            recipient_lead = effective_override or m_lead
             formatted_name = f"[{m_client}] {m_name}"
             
             note_str = f"Step 1 BQ Auto-detected (Mission ID: {m_id})"
-            if override_lead_email:
+            if effective_override:
                 note_str += f" | Real Lead: {m_lead} (Test redirected)"
 
             try:

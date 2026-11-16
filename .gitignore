@@ -52,8 +52,35 @@ pipeline_execution.log
 .DS_Store
 .agent_engine_config.json
 
-# IDEs
+# IDEs & Testing
 .idea/
 .vscode/
 *.swp
 *.swo
+.pytest_cache/
+
+# Local Scratch & Diagnostic Scripts
+inspect_*.py
+adjust_layout.py
+clean_text_boxes.py
+check_permissions.py
+continue_mane_workflow.py
+dump_table_text.py
+enhance_table_typography.py
+list_*.py
+optimize_table_fit.py
+populate_matrix_table.py
+run_random_mission_test.py
+update_slide_*.py
+test_card_dimensions.py
+test_compact_padding.py
+test_drive_quick.py
+test_embed_images_in_deck.py
+test_image_insertion_pipeline.py
+test_new_master_generation.py
+test_vertex_quick.py
+test_workflow_clariane.py
+test_antichamber_e2e.py
+test_candidate_selection.py
+check_debrief_and_remind.py
+

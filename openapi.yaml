@@ -1,509 +1,1705 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
   title: Artefact EOM Workspace Tool Service
-  description: OpenAPI tool connector for Google Cloud Agent Platform to manage Drive extraction, Slides generation, Sheets audit checklists, and Lead email notifications.
+  description: OpenAPI tool connector for Google Cloud Agent Platform to manage Drive
+    extraction, Slides generation, Sheets audit checklists, and Lead email notifications.
   version: 1.0.0
-servers:
-  - url: https://eom-workspace-service-6vcfc2gc7q-ew.a.run.app
-    description: Cloud Run Production Service
 paths:
+  /healthz:
+    get:
+      summary: Health Check
+      operationId: health_check_healthz_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /:
+    get:
+      summary: Health Check
+      operationId: health_check__get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
   /missions/detect:
     post:
+      summary: Api Detect Missions
       operationId: detect_upcoming_missions
-      summary: Step 1 - Queries BigQuery for client missions ending at J-7 or custom date
-      description: Queries global-finance-dashboard.marts_ext_eom_chat.mart_ext_eom_chat_missions to detect ending missions.
       requestBody:
-        required: false
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                daysAhead:
-                  type: integer
-                  default: 7
-                  description: Number of days ahead to scan (default 7 for J-7 kickoff)
-                targetDate:
-                  type: string
-                  description: Specific target date YYYY-MM-DD
-                clientName:
-                  type: string
-                  description: Optional filter by client name
-                leadEmail:
-                  type: string
-                  description: Optional filter by lead email
-                limit:
-                  type: integer
-                  default: 50
+              $ref: '#/components/schemas/DetectMissionsRequest'
+        required: true
       responses:
         '200':
-          description: List of detected missions.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    mission_id:
-                      type: string
-                    mission_name:
-                      type: string
-                    client_name:
-                      type: string
-                    industry:
-                      type: string
-                    lead_email:
-                      type: string
-                    end_date:
-                      type: string
-                    days_until_end:
-                      type: integer
-
+                $ref: '#/components/schemas/HTTPValidationError'
+  /missions/upcoming:
+    get:
+      summary: Api Get Upcoming Missions
+      operationId: api_get_upcoming_missions_missions_upcoming_get
+      parameters:
+      - name: days_ahead
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: 7
+          title: Days Ahead
+      - name: target_date
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Date
+      - name: client
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+      - name: limit
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: 50
+          title: Limit
+      - name: exact_date
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          default: false
+          title: Exact Date
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /missions/detect-and-launch:
     post:
+      summary: Api Detect And Launch
       operationId: detect_and_launch_missions
-      summary: Step 1 to Step 2 Orchestrator - Detects upcoming missions and launches Step 2 for new ones
-      description: Autonomous pipeline trigger that detects J-7 missions from BigQuery, verifies against Central Tracker, and launches uninitialized missions.
       requestBody:
-        required: false
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                daysAhead:
-                  type: integer
-                  default: 7
-                targetDate:
-                  type: string
-                clientName:
-                  type: string
-                autoLaunch:
-                  type: boolean
-                  default: true
-                dryRun:
-                  type: boolean
-                  default: false
-                overrideLeadEmail:
-                  type: string
-                  description: Optional lead email redirect for staging/testing
-                limit:
-                  type: integer
-                  default: 10
+              $ref: '#/components/schemas/DetectAndLaunchRequest'
+        required: true
       responses:
         '200':
-          description: Execution summary of detected and launched missions.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  total_detected:
-                    type: integer
-                  launched_count:
-                    type: integer
-                  skipped_count:
-                    type: integer
-                  missions:
-                    type: array
-                    items:
-                      type: object
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /launch-mission:
     post:
+      summary: Api Launch Mission
       operationId: launch_mission_kickoff
-      summary: Step 2 - Initializes mission workspace folder, 3-section Debrief Google Doc, and sends kickoff email
-      description: Creates the mission workspace, 01_Visuals & Diagrams subfolder, structured Debrief Doc (Challenge, Solution, Results), dispatches kickoff email, and logs status LAUNCHED in central tracker.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - missionName
-                - leadEmail
-              properties:
-                missionName:
-                  type: string
-                  description: Name of the mission
-                leadEmail:
-                  type: string
-                  description: Delivery manager email
-                client:
-                  type: string
-                  description: Client company name
-                teamEmails:
-                  type: array
-                  items:
-                    type: string
-                  description: Optional project team members to CC
-                folderId:
-                  type: string
-                  description: Optional existing mission folder ID
-                parentFolderId:
-                  type: string
-                  description: Optional parent folder ID
-                deadlineDate:
-                  type: string
-                  description: Target debrief deadline date
+              $ref: '#/components/schemas/LaunchMissionRequest'
+        required: true
       responses:
         '200':
-          description: Mission kickoff successfully initialized and email sent.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  missionName:
-                    type: string
-                  folderUrl:
-                    type: string
-                  docUrl:
-                    type: string
-                  visualsFolderUrl:
-                    type: string
-                  emailStatus:
-                    type: string
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /missions/check-debrief:
     post:
+      summary: Api Check Debrief
       operationId: check_mission_debrief_status
-      summary: Step 3 - Checks debrief Google Doc completion and placeholder removal
-      description: Inspects a mission Google Doc or folder to analyze the 3 pillars (Challenge, Solution, Results) for completed content.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                docId:
-                  type: string
-                  description: Google Doc ID or URL
-                folderId:
-                  type: string
-                  description: Google Drive mission folder ID or URL
-                missionName:
-                  type: string
-                  description: Mission name
+              $ref: '#/components/schemas/CheckDebriefStatusRequest'
+        required: true
       responses:
         '200':
-          description: Debrief completion analysis.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  docId:
-                    type: string
-                  isCompleted:
-                    type: boolean
-                  completionRate:
-                    type: number
-                  completedSections:
-                    type: array
-                    items:
-                      type: string
-                  missingSections:
-                    type: array
-                    items:
-                      type: string
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /send-reminder:
     post:
+      summary: Api Send Reminder
       operationId: send_mission_reminder
-      summary: Step 3 - Sends J-3 or J-1 reminder email to mission lead if debrief is incomplete
-      description: Evaluates debrief completion, dispatches corporate Artefact reminder HTML email, and updates Central Status Tracker.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - missionName
-                - leadEmail
-              properties:
-                missionName:
-                  type: string
-                leadEmail:
-                  type: string
-                client:
-                  type: string
-                folderId:
-                  type: string
-                docId:
-                  type: string
-                daysRemaining:
-                  type: integer
-                  default: 3
-                deadlineDate:
-                  type: string
-                overrideLeadEmail:
-                  type: string
-                dryRun:
-                  type: boolean
-                  default: false
+              $ref: '#/components/schemas/SendReminderRequest'
+        required: true
       responses:
         '200':
-          description: Reminder execution result.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /missions/reminders:
     post:
+      summary: Api Trigger Reminders
       operationId: trigger_eom_reminders
-      summary: Step 3 - Automated Batch Reminder Scanner
-      description: Scans Central Pipeline Status Tracker for active missions (LAUNCHED, REMINDER_J3), inspects debrief doc completion, and dispatches J-3 / J-1 reminders.
       requestBody:
-        required: false
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                daysAhead:
-                  type: integer
-                forceSend:
-                  type: boolean
-                  default: false
-                dryRun:
-                  type: boolean
-                  default: false
-                overrideLeadEmail:
-                  type: string
-                limit:
-                  type: integer
-                  default: 20
+              $ref: '#/components/schemas/TriggerRemindersRequest'
+        required: true
       responses:
         '200':
-          description: Batch reminder report.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /extract-documents:
     post:
+      summary: Api Extract Documents
       operationId: extract_folder_documents
-      summary: Extracts text contents and metadata of documents in a Google Drive mission folder
-      description: Reads Google Docs, Slides, and text files from the specified Drive folder, ignoring previously generated artifacts.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - folderId
-              properties:
-                folderId:
-                  type: string
-                  description: The Google Drive folder ID or full URL of the mission folder.
+              $ref: '#/components/schemas/ExtractDocumentsRequest'
+        required: true
       responses:
         '200':
-          description: Successfully extracted mission files.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  folderId:
-                    type: string
-                  missionName:
-                    type: string
-                    description: Inferred mission name from the folder title.
-                  filesCount:
-                    type: integer
-                  files:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id:
-                          type: string
-                        name:
-                          type: string
-                        mimeType:
-                          type: string
-                        content:
-                          type: string
-                  aggregatedContext:
-                    type: string
-                    description: Formatted combined text of all extracted documents ready for synthesis.
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /generate-slide:
     post:
+      summary: Api Generate Slide
       operationId: generate_one_pager_slide
-      summary: Clones the Master Slide Template and populates the 4 executive debrief cards
-      description: Clones the Artefact Master One-Pager Slide into the target mission folder, then updates all placeholders with executive synthesis data.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - folderId
-                - missionName
-                - cardData
-              properties:
-                folderId:
-                  type: string
-                  description: Google Drive Folder ID where the generated slide should be stored.
-                missionName:
-                  type: string
-                  description: Name of the mission (e.g., Clariane, TotalEnergies).
-                templateId:
-                  type: string
-                  description: Optional Google Slides Master Template ID. Defaults to Artefact Executive Master Template.
-                  default: "197zP6K146fFlNSPDrDuHoUiKS9c0KODiypl_u27XWDQ"
-                cardData:
-                  type: object
-                  description: 4-card executive content generated by the Executive Synthesizer.
-                  required:
-                    - context
-                    - deliverables
-                    - businessImpact
-                    - recommendations
-                  properties:
-                    context:
-                      type: string
-                      description: 2-3 concise sentences on client background, initial problem, and mission objectives.
-                    deliverables:
-                      type: string
-                      description: Bullet points summarizing core technical solutions, models, architecture, and deliverables built.
-                    businessImpact:
-                      type: string
-                      description: Quantifiable business impact, performance gains, ROI, efficiency improvements, or strategic value.
-                    recommendations:
-                      type: string
-                      description: Critical takeaways, operational recommendations, and next steps for the client or team.
-                    synthesis:
-                      type: string
-                      description: An integrated executive summary combining all cards.
+              $ref: '#/components/schemas/GenerateSlideRequest'
+        required: true
       responses:
         '200':
-          description: Slide presentation generated successfully.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  presentationId:
-                    type: string
-                  presentationUrl:
-                    type: string
-                  title:
-                    type: string
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /create-audit-sheet:
     post:
+      summary: Api Create Audit Sheet
       operationId: create_audit_sheet
-      summary: Creates the [Checklist & Audit] Google Sheet in the mission folder
-      description: Builds a styled Google Sheet with confidentiality risk tiers (CRITICAL, HIGH, MEDIUM, LOW), suggested categorization tags, and interactive checkboxes for internal Know export.
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - folderId
-                - missionName
-                - auditRecords
-              properties:
-                folderId:
-                  type: string
-                  description: Target Google Drive folder ID.
-                missionName:
-                  type: string
-                  description: Name of the mission.
-                auditRecords:
-                  type: array
-                  description: List of audited project files evaluated by the Security Auditor.
-                  items:
-                    type: object
-                    required:
-                      - filename
-                      - confidentialityRisk
-                      - suggestedTags
-                      - toBeExported
-                    properties:
-                      filename:
-                        type: string
-                      confidentialityRisk:
-                        type: string
-                        enum: [LOW, MEDIUM, HIGH, CRITICAL]
-                      suggestedTags:
-                        type: string
-                        description: Comma-separated categorization tags.
-                      toBeExported:
-                        type: boolean
-                        description: True if safe and eligible for the internal Know repository.
+              $ref: '#/components/schemas/CreateAuditSheetRequest'
+        required: true
       responses:
         '200':
-          description: Audit spreadsheet created successfully.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  spreadsheetId:
-                    type: string
-                  spreadsheetUrl:
-                    type: string
-                  title:
-                    type: string
-                  rowsCount:
-                    type: integer
-
+                $ref: '#/components/schemas/HTTPValidationError'
   /send-notification:
     post:
+      summary: Api Send Notification
       operationId: send_lead_notification
-      summary: Sends an HTML email notification to the mission lead
-      description: Emails the Mission Lead with direct links to the generated Google Slides One-Pager and Google Sheets Checklist.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendNotificationRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /pipeline/status:
+    post:
+      summary: Api Log Pipeline Status
+      operationId: api_log_pipeline_status_pipeline_status_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogPipelineStatusRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /log-pipeline-status:
+    post:
+      summary: Api Log Pipeline Status
+      operationId: log_pipeline_status
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogPipelineStatusRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /antichamber:
+    get:
+      summary: Api Get Antichamber
+      description: 'Renders the interactive Antichamber Web Portal for the detected
+        lead.
+
+        Queries candidate missions from BigQuery matching client and/or lead_email.'
+      operationId: api_get_antichamber_antichamber_get
+      parameters:
+      - name: client
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+      - name: lead_email
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+      - name: mission_ids
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Ids
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            text/html:
+              schema:
+                type: string
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /antichamber/confirm:
+    post:
+      summary: Api Confirm Antichamber
+      description: 'Processes the Antichamber submission from the web portal form
+        or JSON API.
+
+        Handles bundling multiple missions, designating a delegate (with lead in CC),
+
+        and kicking off Step 2 workspace generation.'
+      operationId: confirm_antichamber
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /antichamber/send-notification:
+    post:
+      summary: Api Send Antichamber Notification
+      description: Emails the Antichamber review link to the mission manager with
+        candidate missions.
+      operationId: send_antichamber_notification
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendAntichamberNotificationRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /debrief/validate:
+    get:
+      summary: Api Validate Debrief Get
+      description: '1-Click Validation endpoint triggered from email CTA or Google
+        Doc link.
+
+        Autonomously executes wrapup pipeline: Slides generation (4 personae), Audit
+        sheet,
+
+        Central Tracker update (MISSION_WRAPPED_UP), and notification email.'
+      operationId: validate_debrief_get
+      parameters:
+      - name: folder_id
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Mission folder ID or URL
+          title: Folder Id
+        description: Mission folder ID or URL
+      - name: doc_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Debrief document ID
+          title: Doc Id
+        description: Debrief document ID
+      - name: client
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Client name
+          title: Client
+        description: Client name
+      - name: lead_email
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Lead consultant email
+          title: Lead Email
+        description: Lead consultant email
+      - name: mission_name
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Mission name
+          title: Mission Name
+        description: Mission name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      summary: Api Validate Debrief Post
+      description: API endpoint to trigger autonomous wrap-up after consultant debrief
+        review.
+      operationId: validate_debrief_post
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - recipientEmail
-                - missionName
-                - slideUrl
-                - sheetUrl
-              properties:
-                recipientEmail:
-                  type: string
-                  description: Email address of the mission lead.
-                missionName:
-                  type: string
-                  description: Name of the mission.
-                slideUrl:
-                  type: string
-                  description: URL to the generated Google Slides deck.
-                sheetUrl:
-                  type: string
-                  description: URL to the generated Google Sheets checklist.
+              $ref: '#/components/schemas/ValidateDebriefRequest'
       responses:
         '200':
-          description: Email dispatched successfully.
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  recipientEmail:
-                    type: string
+                $ref: '#/components/schemas/HTTPValidationError'
+  /debrief/prefill:
+    post:
+      summary: Api Prefill Debrief Doc
+      description: 'API endpoint to analyze Drive folder, detect visuals, synthesize
+        Challenge/Solution/Results,
+
+        and create or update the Google Doc with an AI-prefilled debrief and validation
+        CTA.'
+      operationId: prefill_debrief_doc
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrefillDebriefRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /mission/wrapup:
+    post:
+      summary: Api Wrapup Mission
+      description: 'API endpoint to autonomously execute the full end-of-mission wrapup
+        pipeline:
+
+        4-persona Slides, Audit Sheet, Tracker update, and final delivery email.'
+      operationId: wrapup_mission
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WrapupMissionRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    CheckDebriefStatusRequest:
+      properties:
+        docId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Docid
+        doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Doc Id
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+      type: object
+      title: CheckDebriefStatusRequest
+    CreateAuditSheetRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        auditRecords:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Auditrecords
+        audit_records:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Audit Records
+      type: object
+      title: CreateAuditSheetRequest
+    DetectAndLaunchRequest:
+      properties:
+        daysAhead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Daysahead
+          default: 7
+        days_ahead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Days Ahead
+        targetDate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Targetdate
+        target_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Date
+        dateStart:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Datestart
+        date_start:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Date Start
+        dateEnd:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dateend
+        date_end:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Date End
+        clientName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Clientname
+        client_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client Name
+        autoLaunch:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Autolaunch
+          default: true
+        auto_launch:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Auto Launch
+        dryRun:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dryrun
+          default: false
+        dry_run:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dry Run
+        overrideLeadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Overrideleademail
+        override_lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Override Lead Email
+        exactDate:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Exactdate
+          default: false
+        exact_date:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Exact Date
+        parentFolderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parentfolderid
+        parent_folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Folder Id
+        trackerId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trackerid
+        tracker_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tracker Id
+        limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Limit
+          default: 10
+      type: object
+      title: DetectAndLaunchRequest
+    DetectMissionsRequest:
+      properties:
+        daysAhead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Daysahead
+          default: 7
+        days_ahead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Days Ahead
+        targetDate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Targetdate
+        target_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Date
+        dateStart:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Datestart
+        date_start:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Date Start
+        dateEnd:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dateend
+        date_end:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Date End
+        clientName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Clientname
+        client_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client Name
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Limit
+          default: 50
+      type: object
+      title: DetectMissionsRequest
+    ExtractDocumentsRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+      type: object
+      title: ExtractDocumentsRequest
+    GenerateSlideRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        cardData:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Carddata
+        card_data:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Card Data
+        card:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Card
+        templateId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Templateid
+          default: 1DH-zXzB9CmaYB-p0CyXJDR-gdeJ6gSvylM-76IPfkEY
+        template_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Template Id
+        personae:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Personae
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+      type: object
+      title: GenerateSlideRequest
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    LaunchMissionRequest:
+      properties:
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        industry:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Industry
+        teamEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Teamemails
+        team_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Team Emails
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        parentFolderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parentfolderid
+        parent_folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Folder Id
+        deadlineDate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadlinedate
+        deadline_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadline Date
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+        originalLeadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Originalleademail
+        original_lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Original Lead Email
+        ccEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc Emails
+      type: object
+      title: LaunchMissionRequest
+    LogPipelineStatusRequest:
+      properties:
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        status:
+          type: string
+          title: Status
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        deckUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deckurl
+        deck_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deck Url
+        auditUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Auditurl
+        audit_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Audit Url
+        folderUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderurl
+        folder_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Url
+        risk:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Risk
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+      type: object
+      required:
+      - status
+      title: LogPipelineStatusRequest
+    PrefillDebriefRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        teamEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Teamemails
+        team_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Team Emails
+        deadlineDate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadlinedate
+        deadline_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadline Date
+        industry:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Industry
+        prefilledPayload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Prefilledpayload
+        prefilled_payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Prefilled Payload
+        originalLeadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Originalleademail
+        original_lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Original Lead Email
+        ccEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc Emails
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+      type: object
+      title: PrefillDebriefRequest
+    SendAntichamberNotificationRequest:
+      properties:
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        client:
+          type: string
+          title: Client
+        missions:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Missions
+        antichamberUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Antichamberurl
+        antichamber_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Antichamber Url
+        ccEmails:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Cc Emails
+      type: object
+      required:
+      - client
+      title: SendAntichamberNotificationRequest
+    SendNotificationRequest:
+      properties:
+        recipientEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recipientemail
+        recipient_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recipient Email
+        email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Email
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        slideUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Slideurl
+          default: ''
+        slide_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Slide Url
+          default: ''
+        sheetUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sheeturl
+          default: ''
+        sheet_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sheet Url
+          default: ''
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        folderUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderurl
+        folder_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Url
+        industry:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Industry
+        ccEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc Emails
+        cc:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc
+      type: object
+      title: SendNotificationRequest
+    SendReminderRequest:
+      properties:
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        docId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Docid
+        doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Doc Id
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        daysRemaining:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Daysremaining
+          default: 3
+        days_remaining:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Days Remaining
+        deadlineDate:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadlinedate
+        deadline_date:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Deadline Date
+        overrideLeadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Overrideleademail
+        override_lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Override Lead Email
+        dryRun:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dryrun
+          default: false
+        dry_run:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dry Run
+        industry:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Industry
+        trackerId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trackerid
+        tracker_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tracker Id
+      type: object
+      title: SendReminderRequest
+    TriggerRemindersRequest:
+      properties:
+        daysAhead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Daysahead
+        days_ahead:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Days Ahead
+        forceSend:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Forcesend
+          default: false
+        force_send:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Force Send
+        dryRun:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dryrun
+          default: false
+        dry_run:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Dry Run
+        overrideLeadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Overrideleademail
+        override_lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Override Lead Email
+        trackerId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trackerid
+        tracker_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tracker Id
+        limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Limit
+          default: 20
+      type: object
+      title: TriggerRemindersRequest
+    ValidateDebriefRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        docId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Docid
+        doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Doc Id
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        ccEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc Emails
+      type: object
+      title: ValidateDebriefRequest
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    WrapupMissionRequest:
+      properties:
+        folderId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folderid
+        folder_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Folder Id
+        missionName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Missionname
+        mission_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mission Name
+        client:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Client
+        leadEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Leademail
+        lead_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Lead Email
+        docId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Docid
+        doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Doc Id
+        personaCards:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Personacards
+        persona_cards:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Persona Cards
+        personaImages:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Personaimages
+        persona_images:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Persona Images
+        auditRecords:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Auditrecords
+        audit_records:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Audit Records
+        industry:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Industry
+        ccEmails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Ccemails
+        cc_emails:
+          anyOf:
+          - {}
+          - type: 'null'
+          title: Cc Emails
+      type: object
+      title: WrapupMissionRequest

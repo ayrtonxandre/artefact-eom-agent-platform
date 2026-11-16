@@ -190,7 +190,7 @@ In **Agent Designer** -> **Tools** (left navigation) -> **Create Tool**:
 2. **Type**: `OpenAPI`
 3. **Spec**: Select **Upload** and upload `eom_agent_platform/openapi.yaml` (or copy/paste from `openapi.json`).
 4. **Operations Imported**:
-   - `extract_folder_documents` (`POST /extract-documents`)
+   - `extract_folder_documents` (`POST /extract-documents`) : Extracts text from Google Docs, Slides, Sheets, PDFs, and automatically discovers linked Google Drive deliverables folders provided by consultants in the Debrief Doc.
    - `generate_one_pager_slide` (`POST /generate-slide`)
    - `create_audit_sheet` (`POST /create-audit-sheet`)
    - `send_lead_notification` (`POST /send-notification`)
@@ -213,7 +213,7 @@ The backend microservice is prepared in `eom_agent_platform/service/`.
 To deploy it in your GCP project `privategpt-437907`:
 
 ```bash
-cd /Users/ayrtonandre/eom_agent_platform/service
+cd service
 
 gcloud run deploy eom-workspace-service \
   --project privategpt-437907 \
